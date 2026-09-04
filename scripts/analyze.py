@@ -27,6 +27,10 @@ from scripts.triager.references import (
 from scripts.triager.analyzers import (
     analyze_files as analyze_file_set,
 )
+from scripts.triager.codeowners import (
+    parse_codeowners as parse_codeowners_rules,
+    resolve_codeowners as resolve_codeowners_matches,
+)
 
 REPO = os.environ.get("CPYTHON_REPO", "python/cpython")
 CACHE_DIR = Path(os.environ.get("CPYTHON_TRIAGER_CACHE", ".triager-cache"))
@@ -316,120 +320,31 @@ def classify(path):
 
 
 def parse_codeowners(text):
-    rules = []
-
-    for lineno, raw in enumerate(
-        (text or "").splitlines(),
-        1,
-    ):
-        line = raw.strip()
-
-        if not line or line.startswith("#"):
-            continue
-
-        line = re.split(
-            r"\s+#",
-            line,
-            maxsplit=1,
-        )[0].strip()
-
-        parts = line.split()
-
-        if len(parts) < 2:
-            continue
-
-        pattern, owners = parts[0], parts[1:]
-
-        rules.append(
-            {
-                "line": lineno,
-                "pattern": pattern,
-                "owners": owners,
-            }
-        )
-
-    return rules
-
-
-def codeowners_regex(pattern):
-    if any(
-        ch in pattern
-        for ch in "[]!"
-    ):
-        return None
-
-    anchored = pattern.startswith("/")
-    p = pattern.lstrip("/")
-    directory = p.endswith("/")
-
-    if directory:
-        p = p.rstrip("/") + "/**"
-
-    if "/" not in p:
-        prefix = r"^(?:.*/)?"
-    elif anchored:
-        prefix = r"^"
-    else:
-        prefix = r"^(?:.*/)?"
-
-    i = 0
-    out = []
-
-    while i < len(p):
-        ch = p[i]
-
-        if ch == "*":
-            if (
-                i + 1 < len(p)
-                and p[i + 1] == "*"
-            ):
-                i += 1
-
-                if (
-                    i + 1 < len(p)
-                    and p[i + 1] == "/"
-                ):
-                    i += 1
-                    out.append(
-                        r"(?:.*/)?"
-                    )
-                else:
-                    out.append(
-                        r".*"
-                    )
-            else:
-                out.append(
-                    r"[^/]*"
-                )
-
-        elif ch == "?":
-            out.append(
-                r"[^/]"
-            )
-        else:
-            out.append(
-                re.escape(ch)
-            )
-
-        i += 1
-
-    return re.compile(
-        prefix
-        + "".join(out)
-        + r"$"
+    """Compatibility wrapper around the modular CODEOWNERS parser."""
+    rules = parse_codeowners_rules(
+        text
     )
 
+    return [
+        {
+            "line": rule.line,
+            "pattern": rule.pattern,
+            "owners": list(rule.owners),
+        }
+        for rule in rules
+    ]
 
-def codeowners_match(pattern, path):
-    rx = codeowners_regex(
-        pattern
-    )
 
-    return bool(
-        rx
-        and rx.match(
-            path.lstrip("/")
-        )
+def codeowners_match(
+    pattern,
+    path,
+):
+    """Compatibility wrapper around the modular CODEOWNERS matcher."""
+    from scripts.triager.codeowners import _matches
+
+    return _matches(
+        pattern,
+        path,
     )
 
 
@@ -437,30 +352,34 @@ def resolve_codeowners(
     rules,
     filenames,
 ):
-    results = []
+    """Compatibility wrapper around the modular CODEOWNERS resolver."""
+    parsed_rules = [
+        rule
+        if hasattr(rule, "pattern")
+        else type(
+            "CompatCodeOwnerRule",
+            (),
+            {
+                "pattern": rule["pattern"],
+                "owners": tuple(rule["owners"]),
+                "line": rule["line"],
+            },
+        )()
+        for rule in rules
+    ]
 
-    for fname in filenames:
-        matched = None
-
-        for rule in rules:
-            if codeowners_match(
-                rule["pattern"],
-                fname,
-            ):
-                matched = rule
-
-        if matched:
-            for owner in matched["owners"]:
-                results.append(
-                    {
-                        "owner": owner,
-                        "file": fname,
-                        "pattern": matched["pattern"],
-                        "line": matched["line"],
-                    }
-                )
-
-    return results
+    return [
+        {
+            "owner": match.owner,
+            "file": match.file,
+            "pattern": match.pattern,
+            "line": match.line,
+        }
+        for match in resolve_codeowners_matches(
+            parsed_rules,
+            filenames,
+        )
+    ]
 
 
 def extract_refs(text):

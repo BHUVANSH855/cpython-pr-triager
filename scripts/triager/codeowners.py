@@ -7,7 +7,7 @@ Hard-coded expert knowledge is not authoritative ownership.
 
 from __future__ import annotations
 
-import fnmatch
+import re
 from dataclasses import dataclass
 
 from .models import EvidenceRef, OwnershipMatch
@@ -27,6 +27,7 @@ def parse_codeowners(
     Parse a CODEOWNERS file.
 
     Blank lines and comments are ignored.
+    Inline comments are stripped after whitespace followed by ``#``.
     """
 
     if not text:
@@ -45,6 +46,12 @@ def parse_codeowners(
 
         if line.startswith("#"):
             continue
+
+        line = re.split(
+            r"\s+#",
+            line,
+            maxsplit=1,
+        )[0].strip()
 
         parts = line.split()
 
@@ -71,42 +78,113 @@ def _normalize(
     return value.lstrip("/")
 
 
+def _regex(
+    pattern: str,
+) -> re.Pattern[str] | None:
+    """
+    Build the conservative CODEOWNERS matcher used by the legacy triager.
+
+    Unsupported character classes and negation are deliberately rejected
+    rather than approximated.
+    """
+
+    if any(
+        character in pattern
+        for character in "[]!"
+    ):
+        return None
+
+    anchored = pattern.startswith("/")
+    pattern = pattern.lstrip("/")
+
+    directory = pattern.endswith("/")
+
+    if directory:
+        pattern = pattern.rstrip("/") + "/**"
+
+    if "/" not in pattern:
+        prefix = r"^(?:.*/)?"
+    elif anchored:
+        prefix = r"^"
+    else:
+        prefix = r"^(?:.*/)?"
+
+    output: list[str] = []
+    index = 0
+
+    while index < len(pattern):
+        character = pattern[index]
+
+        if character == "*":
+            if (
+                index + 1 < len(pattern)
+                and pattern[index + 1] == "*"
+            ):
+                index += 1
+
+                if (
+                    index + 1 < len(pattern)
+                    and pattern[index + 1] == "/"
+                ):
+                    index += 1
+                    output.append(
+                        r"(?:.*/)?"
+                    )
+                else:
+                    output.append(
+                        r".*"
+                    )
+            else:
+                output.append(
+                    r"[^/]*"
+                )
+
+        elif character == "?":
+            output.append(
+                r"[^/]"
+            )
+
+        else:
+            output.append(
+                re.escape(character)
+            )
+
+        index += 1
+
+    return re.compile(
+        prefix
+        + "".join(output)
+        + r"$"
+    )
+
+
 def _matches(
     pattern: str,
     filename: str,
 ) -> bool:
     """
-    Practical CODEOWNERS-style matcher.
+    Match one filename against one CODEOWNERS pattern.
 
-    This deliberately remains conservative. A pattern match is
-    reported as ownership evidence, not as a claim that the owner
-    will necessarily approve the PR.
+    This intentionally mirrors the existing triager behavior.
     """
 
-    pattern = _normalize(pattern)
-    filename = _normalize(filename)
+    normalized_pattern = _normalize(
+        pattern
+    )
 
-    if pattern.endswith("/"):
-        pattern = pattern + "**"
+    normalized_filename = _normalize(
+        filename
+    )
 
-    if "/" not in pattern:
-        if fnmatch.fnmatchcase(
-            filename,
-            pattern,
-        ):
-            return True
+    matcher = _regex(
+        normalized_pattern
+    )
 
-        return any(
-            fnmatch.fnmatchcase(
-                part,
-                pattern,
-            )
-            for part in filename.split("/")
+    return bool(
+        matcher
+        and matcher.match(
+            normalized_filename
         )
-
-    return fnmatch.fnmatchcase(
-        filename,
-        pattern,
     )
 
 
