@@ -11,3 +11,6 @@ report.json
 *.log
 .DS_Store
 Thumbs.db
+
+# Local triager regression outputs
+data/current-*.json
