@@ -430,166 +430,66 @@ def fetch_pr_evidence(
     gh,
     number,
 ):
-    pr = gh.pr(number)
-    files = gh.files(number)
-    reviews = gh.reviews(number)
-    review_comments = gh.review_comments(number)
-    issue_comments = gh.issue_comments(number)
-    timeline_raw = gh.timeline(number)
+    """
+    Compatibility wrapper around the modular PR evidence collector.
 
-    events = []
-
-    for ev in timeline_raw:
-        actor = (
-            ev.get("actor") or {}
-        ).get(
-            "login",
-            "?",
-        )
-
-        kind = ev.get(
-            "event",
-            "",
-        )
-
-        if kind in {
-            "labeled",
-            "unlabeled",
-            "milestoned",
-            "demilestoned",
-            "closed",
-            "reopened",
-            "merged",
-            "cross-referenced",
-            "review_requested",
-            "review_request_removed",
-            "assigned",
-            "unassigned",
-            "head_ref_deleted",
-            "committed",
-            "base_ref_changed",
-        }:
-            events.append(
-                {
-                    "kind": kind,
-                    "login": actor,
-                    "date": ev.get(
-                        "created_at",
-                        "",
-                    ),
-                    "bot": is_bot(
-                        actor
-                    ),
-                    "event": ev,
-                }
-            )
-
-    for comment in issue_comments:
-        login = (
-            comment.get("user") or {}
-        ).get(
-            "login",
-            "?",
-        )
-
-        events.append(
-            {
-                "kind": "comment",
-                "login": login,
-                "date": comment.get(
-                    "created_at",
-                    "",
-                ),
-                "bot": is_bot(
-                    login
-                ),
-                "body": comment.get(
-                    "body"
-                ) or "",
-            }
-        )
-
-    for review in reviews:
-        login = (
-            review.get("user") or {}
-        ).get(
-            "login",
-            "?",
-        )
-
-        events.append(
-            {
-                "kind": "review",
-                "login": login,
-                "date": (
-                    review.get(
-                        "submitted_at"
-                    )
-                    or review.get(
-                        "updated_at"
-                    )
-                    or ""
-                ),
-                "bot": is_bot(
-                    login
-                ),
-                "body": review.get(
-                    "body"
-                ) or "",
-                "state": review.get(
-                    "state",
-                    "",
-                ),
-            }
-        )
-
-    for comment in review_comments:
-        login = (
-            comment.get("user") or {}
-        ).get(
-            "login",
-            "?",
-        )
-
-        events.append(
-            {
-                "kind": "inline",
-                "login": login,
-                "date": comment.get(
-                    "created_at",
-                    "",
-                ),
-                "bot": is_bot(
-                    login
-                ),
-                "body": comment.get(
-                    "body"
-                ) or "",
-                "path": comment.get(
-                    "path",
-                    "",
-                ),
-                "line": comment.get(
-                    "line"
-                ),
-            }
-        )
-
-    events.sort(
-        key=lambda item: item.get(
-            "date",
-            "",
-        )
+    The CLI still expects the historical evidence dictionary, while the
+    modular GitHub client owns network access and collection.
+    """
+    result = gh.pull_request_evidence(
+        number,
     )
 
-    return {
-        "pr": pr,
-        "files": files,
-        "reviews": reviews,
-        "review_comments": review_comments,
-        "issue_comments": issue_comments,
-        "timeline": events,
-    }
+    evidence = result["evidence"]
+
+    # Preserve the legacy evidence shape consumed by the rest of
+    # analyze.py. The modular collector already returns these keys;
+    # this wrapper only guarantees their presence.
+    evidence.setdefault(
+        "files",
+        [],
+    )
+    evidence.setdefault(
+        "reviews",
+        [],
+    )
+    evidence.setdefault(
+        "review_comments",
+        [],
+    )
+    evidence.setdefault(
+        "issue_comments",
+        [],
+    )
+    evidence.setdefault(
+        "timeline",
+        [],
+    )
+    evidence.setdefault(
+        "linked_issues",
+        [],
+    )
+    evidence.setdefault(
+        "check_runs",
+        {
+            "total_count": 0,
+            "check_runs": [],
+        },
+    )
+    evidence.setdefault(
+        "statuses",
+        [],
+    )
+    evidence.setdefault(
+        "codeowners_path",
+        None,
+    )
+    evidence.setdefault(
+        "codeowners_text",
+        None,
+    )
+
+    return evidence
 
 
 def fetch_linked_issues(
