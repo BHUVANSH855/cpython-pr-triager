@@ -34,6 +34,10 @@ from scripts.triager.codeowners import (
 from scripts.triager.report import (
     build_report,
 )
+from scripts.triager.policy import (
+    disposition as policy_disposition,
+    process_signals as policy_process_signals,
+)
 
 REPO = os.environ.get("CPYTHON_REPO", "python/cpython")
 CACHE_DIR = Path(os.environ.get("CPYTHON_TRIAGER_CACHE", ".triager-cache"))
@@ -1660,7 +1664,7 @@ def make_report(
         files
     )
 
-    process, backports = process_signals(
+    process, backports = policy_process_signals(
         evidence[
             "pr"
         ],
@@ -1670,7 +1674,7 @@ def make_report(
         patterns,
     )
 
-    report_disposition = disposition(
+    report_disposition = policy_disposition(
         process,
         findings,
     )

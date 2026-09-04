@@ -1,258 +1,596 @@
-"""
-CPython process-policy signals.
+﻿"""
+Deterministic policy decisions for CPython PR triage.
 
-This module deliberately does not pretend to know the final
-maintainer decision.
-
-It identifies conditions that deserve process review.
+This module contains process-signal, backport, review, and disposition
+rules. It does not perform GitHub requests or CLI presentation.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
-
-from .models import ProcessSignal
+from pathlib import Path
+from typing import Any
 
 
 MAINTENANCE_BRANCH_RE = re.compile(
-    r"^3\.\d+$"
+    r"^3\.\d+$",
 )
 
-NEWS_PATH_RE = re.compile(
-    r"^Misc/NEWS\.d/"
+BACKPORT_LABEL_RE = re.compile(
+    r"^needs backport to (\d+\.\d+)$",
+    re.I,
 )
 
 
-@dataclass(frozen=True)
-class PolicyContext:
+def file_signals(
+    files: list[dict[str, Any]],
+) -> tuple[
+    list[str],
+    list[str],
+    list[str],
+    list[str],
+]:
     """
-    Evidence available to the policy engine.
-    """
+    Classify changed files into names, tests, NEWS entries, and docs.
 
-    base_branch: str
-
-    labels: tuple[str, ...]
-
-    changed_files: tuple[str, ...]
-
-    has_news: bool
-
-    has_tests: bool
-
-    draft: bool = False
-
-
-def evaluate_process(
-    context: PolicyContext,
-) -> list[ProcessSignal]:
-    """
-    Generate process signals.
-
-    These are not automatically equivalent to a maintainer verdict.
+    This preserves the existing analyzer semantics.
     """
 
-    signals: list[ProcessSignal] = []
+    names = [
+        file_data.get(
+            "filename",
+            "",
+        )
+        for file_data in files
+    ]
 
-    labels = {
-        label.lower()
-        for label in context.labels
-    }
+    tests = [
+        name
+        for name in names
+        if (
+            name.startswith(
+                "Lib/test/",
+            )
+            or "/test/" in name
+            or Path(name).name.startswith(
+                "test_",
+            )
+        )
+    ]
 
-    # --------------------------------------------------------------
-    # Draft state
-    # --------------------------------------------------------------
+    news = [
+        name
+        for name in names
+        if name.startswith(
+            "Misc/NEWS.d/",
+        )
+    ]
 
-    if context.draft:
+    docs = [
+        name
+        for name in names
+        if name.startswith(
+            "Doc/",
+        )
+    ]
+
+    return (
+        names,
+        tests,
+        news,
+        docs,
+    )
+
+
+def review_signals(
+    pr: dict[str, Any],
+    timeline: list[dict[str, Any]],
+) -> list[tuple[str, str]]:
+    """
+    Produce deterministic signals from human review activity.
+    """
+
+    human = [
+        event
+        for event in timeline
+        if not event.get(
+            "bot",
+        )
+    ]
+
+    approvals = [
+        event
+        for event in human
+        if (
+            event.get(
+                "kind",
+            )
+            == "review"
+            and event.get(
+                "state",
+            )
+            == "APPROVED"
+        )
+    ]
+
+    changes = [
+        event
+        for event in human
+        if (
+            event.get(
+                "kind",
+            )
+            == "review"
+            and event.get(
+                "state",
+            )
+            == "CHANGES_REQUESTED"
+        )
+    ]
+
+    signals = []
+
+    if approvals:
         signals.append(
-            ProcessSignal(
-                level="INFO",
-                message=(
-                    "PR is marked draft; maintainer readiness "
-                    "should not be inferred."
-                ),
-                rule_id="draft",
+            (
+                "OK",
+                f"{len(approvals)} human approval review(s) recorded.",
             )
         )
 
-    # --------------------------------------------------------------
-    # Explicit blockers
-    # --------------------------------------------------------------
-
-    if "do-not-merge" in labels:
-        signals.append(
-            ProcessSignal(
-                level="BLOCK",
-                message=(
-                    "DO-NOT-MERGE label is present."
-                ),
-                rule_id="label-do-not-merge",
-            )
+    if changes:
+        latest = max(
+            changes,
+            key=lambda event: event.get(
+                "date",
+                "",
+            ),
         )
 
-    if "awaiting changes" in labels:
-        signals.append(
-            ProcessSignal(
-                level="BLOCK",
-                message=(
-                    "Awaiting changes label indicates "
-                    "author action is expected."
-                ),
-                rule_id="label-awaiting-changes",
+        later = [
+            event
+            for event in human
+            if event.get(
+                "date",
+                "",
             )
-        )
-
-    # --------------------------------------------------------------
-    # NEWS
-    # --------------------------------------------------------------
-
-    if "skip news" in labels:
-        signals.append(
-            ProcessSignal(
-                level="OK",
-                message=(
-                    "NEWS requirement is explicitly waived."
-                ),
-                rule_id="skip-news",
+            > latest.get(
+                "date",
+                "",
             )
-        )
+        ]
 
-    elif (
-        _news_applicable(context)
-        and not context.has_news
-    ):
-        signals.append(
-            ProcessSignal(
-                level="WARN",
-                message=(
-                    "No Misc/NEWS.d entry was detected; "
-                    "verify whether this change requires NEWS."
-                ),
-                rule_id="missing-news",
+        if later:
+            signals.append(
+                (
+                    "INFO",
+                    "Changes were requested by "
+                    f"@{latest.get('login','?')}; "
+                    "later human activity exists.",
+                )
             )
-        )
-
-    # --------------------------------------------------------------
-    # Branch
-    # --------------------------------------------------------------
-
-    if MAINTENANCE_BRANCH_RE.fullmatch(
-        context.base_branch
-    ):
-        signals.append(
-            ProcessSignal(
-                level="INFO",
-                message=(
-                    f"PR targets maintenance branch "
-                    f"{context.base_branch}; verify "
-                    "branch-specific eligibility."
-                ),
-                rule_id="maintenance-branch",
+        else:
+            signals.append(
+                (
+                    "WARN",
+                    "Latest changes-requested review is by "
+                    f"@{latest.get('login','?')} "
+                    "with no later human activity.",
+                )
             )
-        )
 
-    # --------------------------------------------------------------
-    # Tests
-    # --------------------------------------------------------------
-
-    if context.has_tests:
-        signals.append(
-            ProcessSignal(
-                level="INFO",
-                message=(
-                    "Test files are part of the change set."
-                ),
-                rule_id="tests-present",
+    if pr.get(
+        "state",
+    ) == "open":
+        dates = [
+            event.get(
+                "date",
             )
-        )
-
-    elif _test_likely(
-        context.changed_files
-    ):
-        signals.append(
-            ProcessSignal(
-                level="WARN",
-                message=(
-                    "Changed code suggests a test may be "
-                    "appropriate, but no test file was detected."
-                ),
-                rule_id="possible-test-gap",
+            for event in human
+            if event.get(
+                "date",
             )
-        )
+        ]
+
+        if dates:
+            age = _iso_age_days(
+                max(dates),
+            )
+
+            if age is not None:
+                if age > 90:
+                    signals.append(
+                        (
+                            "WARN",
+                            f"No human activity for about {age:.0f} days; "
+                            "review whether follow-up is appropriate.",
+                        )
+                    )
+                elif age > 30:
+                    signals.append(
+                        (
+                            "INFO",
+                            f"No human activity for about {age:.0f} days; "
+                            "follow-up may be appropriate.",
+                        )
+                    )
 
     return signals
 
 
-def _news_applicable(
-    context: PolicyContext,
-) -> bool:
+def branch_and_backport_signals(
+    pr: dict[str, Any],
+    labels: list[str],
+) -> tuple[list[tuple[str, str]], list[str]]:
     """
-    Conservative first-pass NEWS applicability heuristic.
-
-    This will later become a repository-aware policy engine.
+    Produce branch-policy signals and extract requested backport targets.
     """
 
-    labels = {
-        label.lower()
-        for label in context.labels
-    }
-
-    if "skip news" in labels:
-        return False
-
-    files = context.changed_files
-
-    if not files:
-        return False
-
-    # Documentation/release-only changes do not automatically
-    # imply a NEWS entry.
-    if all(
-        filename.startswith(
-            (
-                "Doc/",
-                "Misc/NEWS.d/",
-                "Tools/clinic/",
-            )
+    base = (
+        pr.get(
+            "base",
         )
-        for filename in files
-    ):
-        return False
-
-    # Pure test/support changes are less likely to need NEWS.
-    if all(
-        filename.startswith(
-            (
-                "Lib/test/",
-                "Modules/_testcapi/",
-            )
-        )
-        for filename in files
-    ):
-        return False
-
-    return True
-
-
-def _test_likely(
-    files: tuple[str, ...],
-) -> bool:
-    """
-    Identify source areas where tests are commonly relevant.
-    """
-
-    source_prefixes = (
-        "Python/",
-        "Objects/",
-        "Modules/",
-        "Lib/",
-        "Parser/",
-        "Grammar/",
+        or {}
+    ).get(
+        "ref",
+        "",
     )
 
-    return any(
-        filename.startswith(
-            source_prefixes
+    signals = []
+
+    if MAINTENANCE_BRANCH_RE.fullmatch(
+        base,
+    ):
+        if {
+            "type-feature",
+            "type-enhancement",
+        } & set(labels):
+            signals.append(
+                (
+                    "BLOCK",
+                    "Feature/enhancement-labelled PR "
+                    f"targets maintenance branch {base}; "
+                    "verify CPython branch policy.",
+                )
+            )
+
+        if "type-security" in labels:
+            signals.append(
+                (
+                    "INFO",
+                    "Security-labelled PR targets maintenance "
+                    f"branch {base}; verify security handling.",
+                )
+            )
+
+    backports = []
+
+    for label in labels:
+        match = BACKPORT_LABEL_RE.fullmatch(
+            label,
         )
-        for filename in files
+
+        if match:
+            backports.append(
+                match.group(1),
+            )
+
+    if backports:
+        signals.append(
+            (
+                "INFO",
+                "Backport intent labels: "
+                + ", ".join(
+                    sorted(
+                        backports,
+                    )
+                )
+                + ".",
+            )
+        )
+
+    return (
+        signals,
+        backports,
     )
+
+
+def process_signals(
+    pr: dict[str, Any],
+    files: list[dict[str, Any]],
+    timeline: list[dict[str, Any]],
+    labels: list[str],
+    patterns: dict[str, Any] | None,
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """
+    Determine deterministic process signals and backport targets.
+
+    This is the existing policy flow extracted from analyze.py without
+    changing its decision rules or signal messages.
+    """
+
+    signals = []
+
+    title = pr.get(
+        "title",
+    ) or ""
+
+    if re.match(
+        r"^gh-\d{3,7}:\s+\S",
+        title,
+        re.I,
+    ):
+        signals.append(
+            (
+                "OK",
+                "Title uses the current "
+                "gh-NNNNN issue-reference style.",
+            )
+        )
+    elif re.match(
+        r"^\[(?:3\.\d+|main)\]\s+\S",
+        title,
+    ):
+        signals.append(
+            (
+                "OK",
+                "Title looks like a branch/backport title.",
+            )
+        )
+    else:
+        signals.append(
+            (
+                "INFO",
+                "Title does not use the common gh-/backport "
+                "form; style signal only.",
+            )
+        )
+
+    adds = int(
+        pr.get(
+            "additions",
+            0,
+        )
+        or 0
+    )
+
+    dels = int(
+        pr.get(
+            "deletions",
+            0,
+        )
+        or 0
+    )
+
+    total = adds + dels
+
+    stats = (
+        patterns
+        or {}
+    ).get(
+        "statistics",
+    ) or {}
+
+    p90 = stats.get(
+        "p90",
+    )
+
+    p95 = stats.get(
+        "p95",
+    )
+
+    if (
+        p95 is not None
+        and total > p95
+    ):
+        signals.append(
+            (
+                "WARN",
+                f"PR size {total} changed lines is above sampled p95 ({p95:.0f}).",
+            )
+        )
+    elif (
+        p90 is not None
+        and total > p90
+    ):
+        signals.append(
+            (
+                "INFO",
+                f"PR size {total} changed lines is above sampled p90 ({p90:.0f}).",
+            )
+        )
+    else:
+        signals.append(
+            (
+                "OK",
+                f"PR size is {total} changed lines across "
+                f"{pr.get('changed_files')} files.",
+            )
+        )
+
+    names, tests, news, docs = file_signals(
+        files,
+    )
+
+    labels_set = set(
+        labels,
+    )
+
+    if "skip news" in labels_set:
+        signals.append(
+            (
+                "OK",
+                "skip news label is present.",
+            )
+        )
+    elif news:
+        signals.append(
+            (
+                "OK",
+                f"NEWS entry present ({len(news)} file(s)).",
+            )
+        )
+    elif all(
+        name.startswith(
+            "Doc/",
+        )
+        for name in names
+    ):
+        signals.append(
+            (
+                "INFO",
+                "Documentation-only change has no NEWS entry; usually not required.",
+            )
+        )
+    elif all(
+        name.startswith(
+            "Lib/test/",
+        )
+        for name in names
+    ):
+        signals.append(
+            (
+                "INFO",
+                "Test-only change has no NEWS entry; usually not required.",
+            )
+        )
+    else:
+        signals.append(
+            (
+                "WARN",
+                "No Misc/NEWS.d entry detected; verify whether this change requires one.",
+            )
+        )
+
+    if tests:
+        signals.append(
+            (
+                "OK",
+                f"Test-related file(s) changed ({len(tests)}).",
+            )
+        )
+    elif all(
+        name.startswith(
+            "Doc/",
+        )
+        for name in names
+    ):
+        signals.append(
+            (
+                "INFO",
+                "Documentation-only change has no test file; likely not applicable.",
+            )
+        )
+    else:
+        signals.append(
+            (
+                "WARN",
+                "No test file changed; verify whether regression/behavior coverage is needed.",
+            )
+        )
+
+    if "DO-NOT-MERGE" in labels_set:
+        signals.append(
+            (
+                "BLOCK",
+                "DO-NOT-MERGE is active.",
+            )
+        )
+
+    if "awaiting changes" in labels_set:
+        signals.append(
+            (
+                "BLOCK",
+                "awaiting changes indicates author action is expected.",
+            )
+        )
+
+    if "awaiting merge" in labels_set:
+        signals.append(
+            (
+                "INFO",
+                "awaiting merge is present; verify CI and current review state.",
+            )
+        )
+
+    branch, backports = branch_and_backport_signals(
+        pr,
+        labels,
+    )
+
+    signals.extend(
+        branch,
+    )
+
+    signals.extend(
+        review_signals(
+            pr,
+            timeline,
+        )
+    )
+
+    return (
+        signals,
+        backports,
+    )
+
+
+def disposition(
+    process: list[tuple[str, str]],
+    findings: list[Any],
+) -> str:
+    """
+    Determine the final PR disposition from deterministic signals.
+    """
+
+    if any(
+        signal == "BLOCK"
+        for signal, _ in process
+    ):
+        return "PROCESS_BLOCKED"
+
+    if any(
+        finding.severity
+        in {
+            "CRITICAL",
+            "HIGH",
+        }
+        for finding in findings
+    ):
+        return "NEEDS_TECHNICAL_REVIEW"
+
+    if any(
+        signal == "WARN"
+        for signal, _ in process
+    ):
+        return "NEEDS_MAINTAINER_ATTENTION"
+
+    return "READY_FOR_MAINTAINER_REVIEW"
+
+
+def _iso_age_days(value: str | None) -> float | None:
+    """
+    Calculate age in days without taking a dependency on analyze.py.
+
+    The implementation mirrors the existing iso_age_days() behavior.
+    """
+
+    if not value:
+        return None
+
+    try:
+        import datetime as dt
+
+        return (
+            dt.datetime.now(
+                dt.timezone.utc,
+            )
+            - dt.datetime.fromisoformat(
+                value.replace(
+                    "Z",
+                    "+00:00",
+                ),
+            )
+        ).total_seconds() / 86400
+    except ValueError:
+        return None
