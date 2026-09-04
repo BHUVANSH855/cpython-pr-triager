@@ -499,17 +499,15 @@ def fetch_linked_issues(
     timeline,
     limit=20,
 ):
-    """Fetch GitHub issues explicitly referenced by the PR."""
+    """
+    Discover explicitly referenced GitHub issues and fetch their evidence.
 
+    Reference discovery remains local to the orchestration layer so that
+    CPython-specific reference semantics are preserved. Network retrieval
+    is delegated to the modular GitHub evidence client.
+    """
     text = pr_body or ""
 
-    # GitHub issue / PR references written in the PR body, including:
-    #   GH-30341
-    #   #30341
-    #   fixes #30341
-    #
-    # Keep BPO references separate: bpo-46231 is not automatically a
-    # GitHub issue #46231.
     github_issue_numbers = {
         int(number)
         for number in re.findall(
@@ -543,10 +541,8 @@ def fetch_linked_issues(
     )[:limit]
 
     # Preserve the legacy reference outputs for PEPs and Discussions.
-    _, peps, discussions = (
-        extract_refs(
-            text
-        )
+    _, peps, discussions = extract_refs(
+        text
     )
 
     if not numbers:
