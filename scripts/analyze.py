@@ -13,10 +13,19 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from statistics import median
 
+# Support direct execution with: python scripts/analyze.py
+if __package__ in {None, ""}:
+    REPO_ROOT = Path(__file__).resolve().parents[1]
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
+
 from scripts.triager.github import GitHub as TriagerGitHub
 from scripts.triager.references import (
     collect_issue_numbers,
     issue_refs_from_timeline as extract_timeline_issue_refs,
+)
+from scripts.triager.analyzers import (
+    analyze_files as analyze_file_set,
 )
 
 REPO = os.environ.get("CPYTHON_REPO", "python/cpython")
@@ -671,50 +680,72 @@ def fetch_linked_issues(
     timeline,
     limit=20,
 ):
-    """Use modular reference discovery and GitHub evidence retrieval."""
+    """Fetch GitHub issues explicitly referenced by the PR."""
 
-    text_parts = [
-        pr_body or ""
-    ]
+    text = pr_body or ""
 
-    for event in timeline:
-        if not event.get("bot"):
-            text_parts.append(
-                event.get(
-                    "body",
-                    "",
-                )
-            )
+    # GitHub issue / PR references written in the PR body, including:
+    #   GH-30341
+    #   #30341
+    #   fixes #30341
+    #
+    # Keep BPO references separate: bpo-46231 is not automatically a
+    # GitHub issue #46231.
+    github_issue_numbers = {
+        int(number)
+        for number in re.findall(
+            r"\b(?:GH-|gh-)(\d{3,7})\b",
+            text,
+        )
+    }
 
-    combined_text = "\n".join(
-        text_parts
-    )
-
-    nums, peps, discussions = (
-        collect_issue_numbers(
-            pr_number=pr_number,
-            pr_body=combined_text,
-            timeline=timeline,
-            limit=limit,
+    github_issue_numbers.update(
+        int(number)
+        for number in re.findall(
+            r"(?<!\w)#(\d{3,7})\b",
+            text,
         )
     )
 
-    if not nums:
+    timeline_refs = issue_refs_from_timeline(
+        timeline
+    )
+
+    github_issue_numbers.update(
+        ref["number"]
+        for ref in timeline_refs
+        if ref["number"] != pr_number
+    )
+
+    numbers = sorted(
+        number
+        for number in github_issue_numbers
+        if number != pr_number
+    )[:limit]
+
+    # Preserve the legacy reference outputs for PEPs and Discussions.
+    _, peps, discussions = (
+        extract_refs(
+            text
+        )
+    )
+
+    if not numbers:
         return (
             [],
             peps,
             discussions,
         )
 
-    issues = (
+    linked_issues = (
         gh.linked_issue_evidence_batch(
-            nums,
+            numbers,
             bot_logins=BOT_LOGINS,
         )
     )
 
     return (
-        issues,
+        linked_issues,
         peps,
         discussions,
     )
@@ -827,283 +858,8 @@ def ast_findings(
 
 
 def analyze_diff(files):
-    findings = []
-    signature_changes = []
-
-    for file_data in files:
-        path = file_data.get(
-            "filename",
-            "",
-        )
-
-        patch = file_data.get(
-            "patch"
-        ) or ""
-
-        if not patch:
-            continue
-
-        added, removed = added_removed(
-            patch
-        )
-
-        is_c = path.endswith(
-            (
-                ".c",
-                ".h",
-                ".cc",
-                ".cpp",
-                ".m",
-            )
-        )
-
-        is_py = path.endswith(
-            ".py"
-        )
-
-        is_test = (
-            path.startswith(
-                "Lib/test/"
-            )
-            or "/test/" in path
-            or Path(path).name.startswith(
-                "test_"
-            )
-        )
-
-        checks = []
-
-        if is_c:
-            checks.extend(
-                C_CHECKS
-            )
-
-        if (
-            is_py
-            and not is_test
-        ):
-            checks.extend(
-                PY_CHECKS
-            )
-
-        checks.extend(
-            SEC_CHECKS
-        )
-
-        for (
-            pattern,
-            severity,
-            confidence,
-            message,
-        ) in checks:
-            match = re.search(
-                pattern,
-                added,
-                re.MULTILINE,
-            )
-
-            if match:
-                findings.append(
-                    Finding(
-                        severity,
-                        "STATIC",
-                        path,
-                        message,
-                        confidence,
-                        f"Added diff line matched {pattern!r}.",
-                    )
-                )
-
-        if is_py:
-            for kind, line in ast_findings(
-                path,
-                added,
-            ):
-                if kind == "eval":
-                    findings.append(
-                        Finding(
-                            "HIGH",
-                            "AST",
-                            path,
-                            "AST analysis confirms a newly added eval() call; verify the trust boundary.",
-                            "medium",
-                            f"Added Python syntax contains eval() near line {line}.",
-                        )
-                    )
-
-                elif kind == "exec":
-                    findings.append(
-                        Finding(
-                            "HIGH",
-                            "AST",
-                            path,
-                            "AST analysis confirms a newly added exec() call; verify the trust boundary.",
-                            "medium",
-                            f"Added Python syntax contains exec() near line {line}.",
-                        )
-                    )
-
-        if path.startswith(
-            "Grammar/"
-        ):
-            findings.append(
-                Finding(
-                    "HIGH",
-                    "GRAMMAR",
-                    path,
-                    "Grammar files changed; verify generated/parser artifacts and parser tests.",
-                    "high",
-                    "Changed path is under Grammar/.",
-                )
-            )
-
-        if (
-            re.match(
-                r"^Include/(?!internal/|cpython/)",
-                path,
-            )
-            and path.endswith(".h")
-        ):
-            findings.append(
-                Finding(
-                    "HIGH",
-                    "ABI",
-                    path,
-                    "Public C header changed; explicitly review API/ABI compatibility and Stable ABI impact.",
-                    "high",
-                    "Changed path is a public Include/*.h header.",
-                )
-            )
-
-        old = {
-            match.group(1): match.group(2).strip()
-            for match in re.finditer(
-                r"^\s*def\s+(\w+)\s*\(([^)]*)\)",
-                removed,
-                re.M,
-            )
-        }
-
-        new = {
-            match.group(1): match.group(2).strip()
-            for match in re.finditer(
-                r"^\s*def\s+(\w+)\s*\(([^)]*)\)",
-                added,
-                re.M,
-            )
-        }
-
-        for name in sorted(
-            set(old)
-            & set(new)
-        ):
-            if (
-                old[name] != new[name]
-                and not name.startswith("_")
-            ):
-                signature_changes.append(
-                    {
-                        "function": name,
-                        "file": path,
-                        "old": old[name],
-                        "new": new[name],
-                    }
-                )
-
-                findings.append(
-                    Finding(
-                        "MEDIUM",
-                        "API",
-                        path,
-                        f"Public-looking Python signature changed for {name}(); review compatibility.",
-                        "medium",
-                        f"Old: {old[name]} | New: {new[name]}",
-                    )
-                )
-
-    for file_data in files:
-        path = file_data.get(
-            "filename",
-            "",
-        )
-
-        if not path.endswith(
-            (
-                ".c",
-                ".h",
-                ".cc",
-                ".cpp",
-            )
-        ):
-            continue
-
-        added, _ = added_removed(
-            file_data.get(
-                "patch"
-            ) or ""
-        )
-
-        inc = len(
-            re.findall(
-                r"\bPy_INCREF\s*\(",
-                added,
-            )
-        )
-
-        dec = len(
-            re.findall(
-                r"\bPy_(?:X)?DECREF\s*\(",
-                added,
-            )
-        )
-
-        if inc >= dec + 3:
-            findings.append(
-                Finding(
-                    "LOW",
-                    "REFCOUNT",
-                    path,
-                    f"Added diff contains {inc} INCREF vs {dec} DECREF operations; inspect ownership paths manually.",
-                    "low",
-                    "Local diff counts cannot prove a leak or missing DECREF.",
-                )
-            )
-
-    unique = {}
-
-    for finding in findings:
-        unique[
-            (
-                finding.severity,
-                finding.category,
-                finding.file,
-                finding.message,
-            )
-        ] = finding
-
-    findings = list(
-        unique.values()
-    )
-
-    findings.sort(
-        key=lambda finding: (
-            SEVERITY_ORDER.get(
-                finding.severity,
-                99,
-            ),
-            CONFIDENCE_ORDER.get(
-                finding.confidence,
-                99,
-            ),
-            finding.file,
-        )
-    )
-
-    return (
-        findings,
-        signature_changes,
-    )
-
+    """Compatibility wrapper around the modular deterministic analyzers."""
+    return analyze_file_set(files)
 
 def file_signals(files):
     names = [
@@ -2715,9 +2471,11 @@ def main():
         ) = fetch_linked_issues(
             gh,
             args.pr_number,
-            pr.get(
-                "body"
-            ) or "",
+            (
+                (pr.get("title") or "")
+                + "\n"
+                + (pr.get("body") or "")
+            ),
             evidence[
                 "timeline"
             ],
