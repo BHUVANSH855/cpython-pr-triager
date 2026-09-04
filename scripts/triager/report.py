@@ -1,251 +1,282 @@
 """
-Canonical triage report construction.
+Canonical report construction for CPython PR triage.
 
-This module is where evidence, findings, and process signals
-become one report.
+This module assembles the final report from already-collected evidence
+and deterministic analysis results.
 
-The important ordering rule is:
-
-    collect ALL signals
-        ↓
-    collect ALL findings
-        ↓
-    calculate disposition
-
-Never calculate the disposition before CI/process evidence
-has been incorporated.
+It does not perform GitHub requests and does not own CLI presentation.
 """
 
 from __future__ import annotations
 
-import datetime as dt
-from typing import Iterable
-
-from .models import (
-    CheckSummary,
-    EvidenceCompleteness,
-    FileEvidence,
-    Finding,
-    OwnershipMatch,
-    ProcessSignal,
-    TriageReport,
-)
-
-
-VALID_DISPOSITIONS = {
-    "PROCESS_BLOCKED",
-    "NEEDS_TECHNICAL_REVIEW",
-    "NEEDS_MAINTAINER_ATTENTION",
-    "READY_FOR_MAINTAINER_REVIEW",
-}
-
-
-def disposition(
-    process_signals: Iterable[ProcessSignal],
-    findings: Iterable[Finding],
-) -> str:
-    """
-    Calculate the canonical deterministic disposition.
-
-    Priority:
-
-        process blocker
-            ↓
-        critical/high technical concern
-            ↓
-        process warning
-            ↓
-        medium technical concern
-            ↓
-        ready for maintainer review
-    """
-
-    process = list(
-        process_signals
-    )
-
-    technical = list(
-        findings
-    )
-
-    if any(
-        signal.level.upper()
-        == "BLOCK"
-        for signal in process
-    ):
-        return "PROCESS_BLOCKED"
-
-    if any(
-        finding.severity.upper()
-        in {
-            "CRITICAL",
-            "HIGH",
-        }
-        for finding in technical
-    ):
-        return "NEEDS_TECHNICAL_REVIEW"
-
-    if any(
-        signal.level.upper()
-        == "WARN"
-        for signal in process
-    ):
-        return "NEEDS_MAINTAINER_ATTENTION"
-
-    if any(
-        finding.severity.upper()
-        == "MEDIUM"
-        for finding in technical
-    ):
-        return "NEEDS_TECHNICAL_REVIEW"
-
-    return "READY_FOR_MAINTAINER_REVIEW"
-
-
-def build_completeness(
-    attempted: Iterable[str],
-    available: Iterable[str],
-    errors: dict[str, str] | None = None,
-) -> EvidenceCompleteness:
-    """
-    Build an explicit evidence-completeness object.
-    """
-
-    attempted_values = list(
-        dict.fromkeys(
-            attempted
-        )
-    )
-
-    available_values = list(
-        dict.fromkeys(
-            available
-        )
-    )
-
-    missing = [
-        item
-        for item in attempted_values
-        if item not in available_values
-    ]
-
-    return EvidenceCompleteness(
-        attempted=attempted_values,
-        available=available_values,
-        missing=missing,
-        errors=errors or {},
-    )
-
-
-def normalize_files(
-    files: list[dict],
-) -> list[FileEvidence]:
-    """
-    Convert raw GitHub file objects into canonical file evidence.
-    """
-
-    result: list[FileEvidence] = []
-
-    for file_data in files:
-        result.append(
-            FileEvidence(
-                filename=file_data.get(
-                    "filename",
-                    "",
-                ),
-                status=file_data.get(
-                    "status"
-                ),
-                additions=int(
-                    file_data.get(
-                        "additions",
-                        0,
-                    )
-                    or 0
-                ),
-                deletions=int(
-                    file_data.get(
-                        "deletions",
-                        0,
-                    )
-                    or 0
-                ),
-                patch_available=bool(
-                    file_data.get(
-                        "patch"
-                    )
-                ),
-            )
-        )
-
-    return result
+from typing import Any, Callable
 
 
 def build_report(
+    *,
     repository: str,
-    pr: dict,
-    files: list[dict],
-    process_signals: list[ProcessSignal],
-    findings: list[Finding],
-    experts: list[OwnershipMatch],
-    checks: CheckSummary | None = None,
-    evidence_completeness: EvidenceCompleteness | None = None,
-    linked_issues: list[dict] | None = None,
-    references: dict | None = None,
-    backport_targets: list[str] | None = None,
-    signature_changes: list[dict] | None = None,
-    historical_context: dict | None = None,
-    metadata: dict | None = None,
-) -> TriageReport:
+    generated_at: str,
+    evidence: dict[str, Any],
+    linked_issues: list[dict[str, Any]],
+    experts: list[dict[str, Any]],
+    findings: list[Any],
+    signatures: list[dict[str, Any]],
+    process: list[tuple[str, str]],
+    backports: list[str],
+    disposition: str,
+    checks: dict[str, Any],
+    classify: Callable[[str], tuple[str, str, str | None]],
+    summarize_labels: Callable[
+        [list[str], dict[str, Any]],
+        list[dict[str, Any]],
+    ],
+    label_metadata: Callable[
+        [Any],
+        dict[str, Any],
+    ],
+    gh: Any,
+) -> dict[str, Any]:
     """
-    Construct the canonical report.
+    Build the canonical triager report.
 
-    Disposition is deliberately calculated LAST.
+    The function intentionally receives analysis results and small
+    application callbacks instead of importing orchestration logic.
+    This keeps report construction independent of GitHub and CLI concerns
+    while preserving the existing report schema.
     """
 
-    return TriageReport(
-        schema_version="2.0",
-        repository=repository,
-        generated_at=dt.datetime.now(
-            dt.timezone.utc
-        ).isoformat(),
-        disposition=disposition(
-            process_signals,
-            findings,
-        ),
-        pr=pr,
-        process_signals=process_signals,
-        technical_findings=findings,
-        files=normalize_files(
-            files
-        ),
-        experts=experts,
-        checks=checks,
-        evidence_completeness=(
-            evidence_completeness
-            or EvidenceCompleteness()
-        ),
-        linked_issues=(
-            linked_issues
-            or []
-        ),
-        references=(
-            references
-            or {}
-        ),
-        backport_targets=(
-            backport_targets
-            or []
-        ),
-        signature_changes=(
-            signature_changes
-            or []
-        ),
-        historical_context=(
-            historical_context
-        ),
-        metadata=(
-            metadata
-            or {}
-        ),
+    pr = evidence["pr"]
+    files = evidence["files"]
+    timeline = evidence["timeline"]
+
+    labels = [
+        item.get("name")
+        for item in pr.get("labels", [])
+    ]
+
+    adds = sum(
+        int(
+            file_data.get(
+                "additions",
+                0,
+            )
+            or 0
+        )
+        for file_data in files
     )
+
+    dels = sum(
+        int(
+            file_data.get(
+                "deletions",
+                0,
+            )
+            or 0
+        )
+        for file_data in files
+    )
+
+    if (
+        checks.get(
+            "summary",
+            {},
+        ).get(
+            "failures"
+        )
+    ):
+        process = [
+            *process,
+            (
+                "WARN",
+                f"{checks['summary']['failures']} "
+                "completed CI check(s) have failure-like conclusions.",
+            ),
+        ]
+
+    return {
+        "schema_version": "1.0",
+        "repository": repository,
+        "generated_at": generated_at,
+        "pr": {
+            "number": pr.get(
+                "number"
+            ),
+            "title": pr.get(
+                "title"
+            ),
+            "state": pr.get(
+                "state"
+            ),
+            "merged": bool(
+                pr.get(
+                    "merged_at"
+                )
+            ),
+            "draft": bool(
+                pr.get(
+                    "draft"
+                )
+            ),
+            "author": (
+                pr.get(
+                    "user"
+                )
+                or {}
+            ).get(
+                "login"
+            ),
+            "base": (
+                pr.get(
+                    "base"
+                )
+                or {}
+            ).get(
+                "ref"
+            ),
+            "base_sha": (
+                pr.get(
+                    "base"
+                )
+                or {}
+            ).get(
+                "sha"
+            ),
+            "head": (
+                pr.get(
+                    "head"
+                )
+                or {}
+            ).get(
+                "ref"
+            ),
+            "head_sha": (
+                pr.get(
+                    "head"
+                )
+                or {}
+            ).get(
+                "sha"
+            ),
+            "labels": labels,
+            "additions": adds,
+            "deletions": dels,
+            "changed_files": pr.get(
+                "changed_files"
+            ),
+            "commits": pr.get(
+                "commits"
+            ),
+            "created_at": pr.get(
+                "created_at"
+            ),
+            "updated_at": pr.get(
+                "updated_at"
+            ),
+            "closed_at": pr.get(
+                "closed_at"
+            ),
+            "merged_at": pr.get(
+                "merged_at"
+            ),
+            "mergeable": pr.get(
+                "mergeable"
+            ),
+            "mergeable_state": pr.get(
+                "mergeable_state"
+            ),
+        },
+        "disposition": disposition,
+        "process_signals": [
+            {
+                "signal": signal,
+                "message": message,
+            }
+            for signal, message in process
+        ],
+        "backport_targets": backports,
+        "technical_findings": [
+            finding.as_dict()
+            for finding in findings
+        ],
+        "signature_changes": signatures,
+        "files": [
+            {
+                "filename": file_data.get(
+                    "filename"
+                ),
+                "status": file_data.get(
+                    "status"
+                ),
+                "additions": file_data.get(
+                    "additions"
+                ),
+                "deletions": file_data.get(
+                    "deletions"
+                ),
+                "subsystem": classify(
+                    file_data.get(
+                        "filename",
+                        "",
+                    )
+                )[0],
+                "component": classify(
+                    file_data.get(
+                        "filename",
+                        "",
+                    )
+                )[1],
+                "expected_test_hint": classify(
+                    file_data.get(
+                        "filename",
+                        "",
+                    )
+                )[2],
+            }
+            for file_data in files
+        ],
+        "experts": experts,
+        "labels": summarize_labels(
+            labels,
+            label_metadata(gh),
+        ),
+        "checks": checks,
+        "linked_issues": linked_issues,
+        "timeline": timeline,
+        "evidence_counts": {
+            "timeline_events": len(
+                timeline
+            ),
+            "human_timeline_events": sum(
+                not event.get(
+                    "bot"
+                )
+                for event in timeline
+            ),
+            "reviews": len(
+                evidence[
+                    "reviews"
+                ]
+            ),
+            "review_comments": len(
+                evidence[
+                    "review_comments"
+                ]
+            ),
+            "issue_comments": len(
+                evidence[
+                    "issue_comments"
+                ]
+            ),
+            "linked_issues": len(
+                linked_issues
+            ),
+            "api_calls": gh.calls,
+            "cache_hits": gh.cache_hits,
+            "rate_limit_remaining": (
+                gh.rate_remaining
+            ),
+            "rate_limit_reset": (
+                gh.rate_reset
+            ),
+        },
+    }

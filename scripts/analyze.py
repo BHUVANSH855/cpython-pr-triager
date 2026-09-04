@@ -31,6 +31,9 @@ from scripts.triager.codeowners import (
     parse_codeowners as parse_codeowners_rules,
     resolve_codeowners as resolve_codeowners_matches,
 )
+from scripts.triager.report import (
+    build_report,
+)
 
 REPO = os.environ.get("CPYTHON_REPO", "python/cpython")
 CACHE_DIR = Path(os.environ.get("CPYTHON_TRIAGER_CACHE", ".triager-cache"))
@@ -1633,10 +1636,6 @@ def make_report(
     experts,
     patterns,
 ):
-    pr = evidence[
-        "pr"
-    ]
-
     files = evidence[
         "files"
     ]
@@ -1649,7 +1648,9 @@ def make_report(
         item.get(
             "name"
         )
-        for item in pr.get(
+        for item in evidence[
+            "pr"
+        ].get(
             "labels",
             [],
         )
@@ -1660,7 +1661,9 @@ def make_report(
     )
 
     process, backports = process_signals(
-        pr,
+        evidence[
+            "pr"
+        ],
         files,
         timeline,
         labels,
@@ -1672,217 +1675,30 @@ def make_report(
         findings,
     )
 
-    adds, dels = changed_lines(
-        files
-    )
-
     checks = build_checks(
         gh,
-        pr,
+        evidence[
+            "pr"
+        ],
     )
 
-    if (
-        checks.get(
-            "summary",
-            {},
-        ).get(
-            "failures"
-        )
-    ):
-        process.append(
-            (
-                "WARN",
-                f"{checks['summary']['failures']} completed CI check(s) have failure-like conclusions.",
-            )
-        )
-
-    return {
-        "schema_version": "1.0",
-        "repository": REPO,
-        "generated_at": now_utc().isoformat(),
-        "pr": {
-            "number": pr.get(
-                "number"
-            ),
-            "title": pr.get(
-                "title"
-            ),
-            "state": pr.get(
-                "state"
-            ),
-            "merged": bool(
-                pr.get(
-                    "merged_at"
-                )
-            ),
-            "draft": bool(
-                pr.get(
-                    "draft"
-                )
-            ),
-            "author": (
-                pr.get(
-                    "user"
-                )
-                or {}
-            ).get(
-                "login"
-            ),
-            "base": (
-                pr.get(
-                    "base"
-                )
-                or {}
-            ).get(
-                "ref"
-            ),
-            "base_sha": (
-                pr.get(
-                    "base"
-                )
-                or {}
-            ).get(
-                "sha"
-            ),
-            "head": (
-                pr.get(
-                    "head"
-                )
-                or {}
-            ).get(
-                "ref"
-            ),
-            "head_sha": (
-                pr.get(
-                    "head"
-                )
-                or {}
-            ).get(
-                "sha"
-            ),
-            "labels": labels,
-            "additions": adds,
-            "deletions": dels,
-            "changed_files": pr.get(
-                "changed_files"
-            ),
-            "commits": pr.get(
-                "commits"
-            ),
-            "created_at": pr.get(
-                "created_at"
-            ),
-            "updated_at": pr.get(
-                "updated_at"
-            ),
-            "closed_at": pr.get(
-                "closed_at"
-            ),
-            "merged_at": pr.get(
-                "merged_at"
-            ),
-            "mergeable": pr.get(
-                "mergeable"
-            ),
-            "mergeable_state": pr.get(
-                "mergeable_state"
-            ),
-        },
-        "disposition": report_disposition,
-        "process_signals": [
-            {
-                "signal": signal,
-                "message": message,
-            }
-            for signal, message in process
-        ],
-        "backport_targets": backports,
-        "technical_findings": [
-            finding.as_dict()
-            for finding in findings
-        ],
-        "signature_changes": signatures,
-        "files": [
-            {
-                "filename": file_data.get(
-                    "filename"
-                ),
-                "status": file_data.get(
-                    "status"
-                ),
-                "additions": file_data.get(
-                    "additions"
-                ),
-                "deletions": file_data.get(
-                    "deletions"
-                ),
-                "subsystem": classify(
-                    file_data.get(
-                        "filename",
-                        "",
-                    )
-                )[0],
-                "component": classify(
-                    file_data.get(
-                        "filename",
-                        "",
-                    )
-                )[1],
-                "expected_test_hint": classify(
-                    file_data.get(
-                        "filename",
-                        "",
-                    )
-                )[2],
-            }
-            for file_data in files
-        ],
-        "experts": experts,
-        "labels": summarize_labels(
-            labels,
-            label_metadata(gh),
-        ),
-        "checks": checks,
-        "linked_issues": linked_issues,
-        "timeline": timeline,
-        "evidence_counts": {
-            "timeline_events": len(
-                timeline
-            ),
-            "human_timeline_events": sum(
-                not event.get(
-                    "bot"
-                )
-                for event in timeline
-            ),
-            "reviews": len(
-                evidence[
-                    "reviews"
-                ]
-            ),
-            "review_comments": len(
-                evidence[
-                    "review_comments"
-                ]
-            ),
-            "issue_comments": len(
-                evidence[
-                    "issue_comments"
-                ]
-            ),
-            "linked_issues": len(
-                linked_issues
-            ),
-            "api_calls": gh.calls,
-            "cache_hits": gh.cache_hits,
-            "rate_limit_remaining": (
-                gh.rate_remaining
-            ),
-            "rate_limit_reset": (
-                gh.rate_reset
-            ),
-        },
-    }
+    return build_report(
+        repository=REPO,
+        generated_at=now_utc().isoformat(),
+        evidence=evidence,
+        linked_issues=linked_issues,
+        experts=experts,
+        findings=findings,
+        signatures=signatures,
+        process=process,
+        backports=backports,
+        disposition=report_disposition,
+        checks=checks,
+        classify=classify,
+        summarize_labels=summarize_labels,
+        label_metadata=label_metadata,
+        gh=gh,
+    )
 
 
 def ai_synthesis(report):
