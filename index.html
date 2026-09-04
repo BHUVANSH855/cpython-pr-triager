@@ -1,0 +1,1243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CPython Deep Triager v5</title>
+<style>
+:root{
+  --bg:#f4f4f2;--surf:#fff;--s1:#f7f7f5;--s2:#f0f0ee;--s3:#e8e8e6;
+  --bd:rgba(0,0,0,.08);--bd2:rgba(0,0,0,.14);--bd3:rgba(0,0,0,.2);
+  --tx:#181816;--tx2:#565650;--tx3:#96968e;
+  --ac:#1a56db;--abg:#eff4ff;--at:#1a4fb5;
+  --gn:#166534;--gbg:#f0fdf4;--gt:#15803d;
+  --yw:#92400e;--ybg:#fffbeb;--yt:#b45309;
+  --rd:#991b1b;--rbg:#fff1f2;--rt:#be123c;
+  --pu:#5b21b6;--pubg:#f5f3ff;--put:#6d28d9;
+  --or:#9a3412;--obg:#fff7ed;--ot:#c2410c;
+  --te:#0f766e;--tbg:#f0fdfa;--tt:#0d9488;
+  --pi:#9d174d;--pibg:#fdf2f8;--pit:#be185d;
+  --mn:"JetBrains Mono","Cascadia Code","Fira Code",monospace;
+  --r:7px;--r2:12px;--sh:0 1px 4px rgba(0,0,0,.07)
+}
+@media(prefers-color-scheme:dark){:root{
+  --bg:#0e0e0c;--surf:#1a1a18;--s1:#202020;--s2:#282826;--s3:#303030;
+  --bd:rgba(255,255,255,.07);--bd2:rgba(255,255,255,.13);--bd3:rgba(255,255,255,.2);
+  --tx:#e8e8e2;--tx2:#98988e;--tx3:#58584e;
+  --ac:#60a5fa;--abg:#1e3a6e;--at:#93c5fd;
+  --gn:#22c55e;--gbg:#052e16;--gt:#86efac;
+  --yw:#f59e0b;--ybg:#1c1100;--yt:#fcd34d;
+  --rd:#f43f5e;--rbg:#2d0a14;--rt:#fda4af;
+  --pu:#a78bfa;--pubg:#1e1040;--put:#c4b5fd;
+  --or:#fb923c;--obg:#1c0900;--ot:#fdba74;
+  --te:#2dd4bf;--tbg:#042f2e;--tt:#5eead4;
+  --pi:#f472b6;--pibg:#2d0a1e;--pit:#f9a8d4
+}}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--bg);color:var(--tx);font-size:14px;line-height:1.6;min-height:100vh}
+a{color:var(--ac)}a:hover{opacity:.8}
+code{font-family:var(--mn);font-size:12px;background:var(--s2);padding:1px 5px;border-radius:4px;border:1px solid var(--bd)}
+.wrap{max-width:1080px;margin:0 auto;padding:2rem 1.5rem}
+.hdr{display:flex;align-items:center;gap:14px;margin-bottom:8px}
+.logo{width:44px;height:44px;border-radius:14px;background:conic-gradient(from 200deg,#1a56db,#5b21b6,#0f766e,#1a56db);display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0}
+.hdr h1{font-size:22px;font-weight:800;letter-spacing:-.5px}
+.ver{font-size:10px;font-weight:800;padding:2px 8px;border-radius:999px;background:var(--gbg);color:var(--gt);border:1px solid var(--gn)}
+.sub{font-size:13px;color:var(--tx2);margin-bottom:1.5rem;line-height:1.7;max-width:760px}
+.irow{display:flex;gap:8px;margin-bottom:10px}
+.irow input{flex:1;height:42px;padding:0 14px;border:1.5px solid var(--bd2);border-radius:var(--r);background:var(--surf);color:var(--tx);font-family:var(--mn);font-size:13px;outline:none;transition:border-color .15s}
+.irow input:focus{border-color:var(--ac)}
+.rbtn{height:42px;padding:0 20px;background:var(--ac);color:#fff;border:none;border-radius:var(--r);font-size:13px;font-weight:800;cursor:pointer;display:flex;align-items:center;gap:7px;white-space:nowrap;transition:opacity .15s}
+.rbtn:hover{opacity:.88}.rbtn:disabled{opacity:.35;cursor:not-allowed}
+.brow{display:flex;gap:7px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
+.blbl{font-size:11px;color:var(--tx3);font-weight:700;letter-spacing:.05em}
+.bb{font-size:12px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--bd2);color:var(--tx2);cursor:pointer;background:var(--surf);transition:all .12s;font-weight:500}
+.bb:hover,.bb.on{border-color:var(--ac);color:var(--at);background:var(--abg);font-weight:700}
+.bb.sec{border-style:dashed}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:1.5rem;align-items:center}
+.clbl{font-size:11px;color:var(--tx3);font-weight:700;letter-spacing:.04em}
+.chip{font-size:12px;padding:3px 11px;border-radius:999px;border:1px solid var(--bd2);color:var(--tx2);cursor:pointer;background:var(--surf);transition:all .12s}
+.chip:hover{background:var(--s1);color:var(--tx);border-color:var(--ac)}
+.err{font-size:13px;color:var(--rt);background:var(--rbg);padding:9px 14px;border-radius:var(--r);margin-bottom:1rem;border:1px solid var(--rd)}
+/* Pipeline */
+.pipeline{background:var(--surf);border:1px solid var(--bd);border-radius:var(--r2);padding:1.1rem 1.4rem;margin-bottom:1rem;box-shadow:var(--sh)}
+.phdr{font-size:10px;font-weight:800;color:var(--tx3);letter-spacing:.09em;margin-bottom:12px}
+.pgrid{display:grid;grid-template-columns:1fr 1fr;gap:5px}
+@media(max-width:560px){.pgrid{grid-template-columns:1fr}}
+.step{display:flex;align-items:center;gap:9px;padding:5px 8px;border-radius:6px}
+.step.run{background:var(--abg)}
+.sdot{width:20px;height:20px;border-radius:50%;border:1.5px solid var(--bd2);display:flex;align-items:center;justify-content:center;font-size:9px;flex-shrink:0;font-weight:900;transition:all .22s}
+.sdot.done{background:var(--gbg);border-color:var(--gn);color:var(--gt)}
+.sdot.run{background:var(--abg);border-color:var(--ac);animation:pulse .8s ease-in-out infinite}
+.sdot.skip{background:var(--s2);border-color:var(--bd);color:var(--tx3)}
+.sdot.fail{background:var(--rbg);border-color:var(--rd);color:var(--rt)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+.slbl{font-size:12px;flex:1;color:var(--tx3)}.slbl.run{color:var(--tx);font-weight:600}.slbl.done{color:var(--tx2)}
+.scnt{font-size:10px;padding:2px 7px;border-radius:999px;white-space:nowrap;font-weight:700;margin-left:auto}
+.sc-ok{background:var(--gbg);color:var(--gt)}.sc-w{background:var(--ybg);color:var(--yt)}.sc-bad{background:var(--rbg);color:var(--rt)}.sc-na{background:var(--s2);color:var(--tx3)}
+/* Cards */
+.card{background:var(--surf);border:1px solid var(--bd);border-radius:var(--r2);overflow:hidden;margin-bottom:1rem;box-shadow:var(--sh)}
+.csec{padding:.9rem 1.3rem;border-bottom:1px solid var(--bd)}.csec:last-child{border-bottom:none}
+.CLBL{font-size:10px;font-weight:800;color:var(--tx3);letter-spacing:.09em;text-transform:uppercase;margin-bottom:8px}
+/* Verdict */
+.vrow{display:flex;align-items:flex-start;gap:14px}
+.vico{font-size:30px;flex-shrink:0;line-height:1.1}
+.vname{font-size:19px;font-weight:900;letter-spacing:-.3px}
+.vwhy{font-size:13px;color:var(--tx2);margin-top:4px;line-height:1.55}
+.va .vname{color:var(--gn)}.vr .vname{color:var(--yw)}.vn .vname{color:var(--ac)}.vx .vname{color:var(--rd)}
+/* Meta */
+.mstrip{display:flex;gap:2rem;flex-wrap:wrap}
+.mi{display:flex;flex-direction:column;gap:5px}
+.milbl{font-size:10px;font-weight:800;color:var(--tx3);letter-spacing:.05em}
+.prow{display:flex;align-items:center;gap:8px}
+.pb{width:80px;height:5px;border-radius:3px;background:var(--s3);overflow:hidden}
+.pbf{height:100%;border-radius:3px}
+.pl-low .pbf{background:var(--gn);width:18%}.pl-medium .pbf{background:var(--yw);width:50%}.pl-high .pbf{background:var(--or);width:78%}.pl-critical .pbf{background:var(--rd);width:100%}
+.plbl{font-size:12px;font-weight:800;min-width:52px}
+.pl-low .plbl{color:var(--gt)}.pl-medium .plbl{color:var(--yt)}.pl-high .plbl{color:var(--ot)}.pl-critical .plbl{color:var(--rt)}
+.cdots{display:flex;gap:3px}.cdot{width:8px;height:8px;border-radius:50%;background:var(--s3)}.cdot.on{background:var(--ac)}
+.rbadge{font-size:12px;font-weight:700;padding:2px 9px;border-radius:999px}
+.rl{background:var(--gbg);color:var(--gt)}.rm{background:var(--ybg);color:var(--yt)}.rh{background:var(--rbg);color:var(--rt)}
+.prose{font-size:13px;line-height:1.85;color:var(--tx);white-space:pre-wrap;word-break:break-word}
+/* Alert */
+.abar{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:.75rem}
+.ai{display:flex;align-items:center;gap:5px;padding:4px 12px;border-radius:999px;font-size:12px;font-weight:700}
+.a-crit{background:var(--rbg);color:var(--rt);border:1.5px solid var(--rd)}
+.a-high{background:var(--obg);color:var(--ot);border:1.5px solid var(--or)}
+.a-warn{background:var(--ybg);color:var(--yt);border:1.5px solid var(--yw)}
+.a-ok{background:var(--gbg);color:var(--gt);border:1.5px solid var(--gn)}
+.a-info{background:var(--abg);color:var(--at);border:1.5px solid var(--ac)}
+.a-pink{background:var(--pibg);color:var(--pit);border:1.5px solid var(--pi)}
+/* Tabs */
+.tabbar{display:flex;border-bottom:2px solid var(--bd);margin-bottom:1rem;overflow-x:auto;gap:0}
+.tab{font-size:13px;padding:8px 16px;cursor:pointer;color:var(--tx2);border-bottom:2.5px solid transparent;margin-bottom:-2px;white-space:nowrap;display:flex;align-items:center;gap:5px;font-weight:500;transition:all .12s}
+.tab:hover{color:var(--tx)}.tab.on{color:var(--at);font-weight:800;border-bottom-color:var(--ac)}
+.tbadge{font-size:10px;padding:1px 5px;border-radius:999px;font-weight:800}
+.tb-r{background:var(--rbg);color:var(--rt)}.tb-y{background:var(--ybg);color:var(--yt)}.tb-g{background:var(--gbg);color:var(--gt)}.tb-b{background:var(--abg);color:var(--at)}.tb-p{background:var(--pibg);color:var(--pit)}
+.panel{display:none}.panel.on{display:block}
+/* PR meta */
+.prmeta{background:var(--surf);border:1px solid var(--bd);border-radius:var(--r2);padding:1.1rem 1.4rem;margin-bottom:1rem;box-shadow:var(--sh)}
+.pr-top{display:flex;gap:12px;justify-content:space-between;align-items:flex-start;margin-bottom:10px}
+.pr-title{font-size:16px;font-weight:800;line-height:1.35}
+.pr-sub{font-size:12px;color:var(--tx2);margin-top:5px;display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.stbadge{font-size:11px;font-weight:800;padding:3px 11px;border-radius:999px;white-space:nowrap;flex-shrink:0}
+.st-open{background:var(--gbg);color:var(--gt);border:1px solid var(--gn)}
+.st-merged{background:var(--pubg);color:var(--put);border:1px solid var(--pu)}
+.st-closed{background:var(--rbg);color:var(--rt);border:1px solid var(--rd)}
+.st-draft{background:var(--s2);color:var(--tx2);border:1px solid var(--bd2)}
+/* Timeline */
+.timeline{display:flex;flex-direction:column;gap:0}
+.tl-item{display:flex;gap:12px;padding:8px 0;position:relative}
+.tl-item::before{content:"";position:absolute;left:15px;top:28px;bottom:-4px;width:2px;background:var(--bd);z-index:0}
+.tl-item:last-child::before{display:none}
+.tl-dot{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:14px;position:relative;z-index:1;border:2px solid var(--bd);background:var(--surf)}
+.tl-body{flex:1;padding-top:4px}
+.tl-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.tl-actor{font-size:12px;font-weight:700}
+.tl-action{font-size:12px;color:var(--tx2)}
+.tl-time{font-size:11px;color:var(--tx3);margin-left:auto;white-space:nowrap}
+.tl-content{font-size:13px;color:var(--tx);margin-top:5px;line-height:1.6;background:var(--s1);padding:8px 12px;border-radius:var(--r);border:1px solid var(--bd);white-space:pre-wrap;word-break:break-word}
+.tl-lsig{font-size:12px;color:var(--tx2);margin-top:3px}
+/* Findings */
+.flist{display:flex;flex-direction:column;gap:6px}
+.fi{display:flex;gap:10px;padding:8px 12px;border-radius:var(--r);border:1px solid var(--bd);align-items:flex-start}
+.fi.CRIT,.fi.SEC{border-color:var(--rd);background:var(--rbg)}
+.fi.HIGH{border-color:var(--or);background:var(--obg)}
+.fi.MED{border-color:var(--yw);background:var(--ybg)}
+.fi.LOW{background:var(--s1);border-color:var(--bd2)}
+.fi.FT{border-color:var(--pu);background:var(--pubg)}
+.fi.ABI{border-color:var(--or);background:var(--obg)}
+.fsev{font-size:10px;font-weight:900;padding:2px 7px;border-radius:4px;white-space:nowrap;margin-top:2px;flex-shrink:0}
+.sv-CRIT,.sv-SEC{background:var(--rd);color:#fff}
+.sv-HIGH{background:var(--or);color:#fff}
+.sv-MED{background:var(--ybg);color:var(--yt);border:1px solid var(--yw)}
+.sv-LOW{background:var(--s2);color:var(--tx2);border:1px solid var(--bd2)}
+.sv-FT{background:var(--pu);color:#fff}
+.sv-ABI,.sv-NEWS{background:var(--or);color:#fff}
+.sv-REF{background:var(--rd);color:#fff}
+.fbody{flex:1}.ffile{font-size:11px;color:var(--tx3);font-family:var(--mn);margin-bottom:2px}
+.fmsg{font-size:13px}
+.fi.CRIT .fmsg,.fi.SEC .fmsg{color:var(--rt);font-weight:700}
+.fi.HIGH .fmsg,.fi.ABI .fmsg{color:var(--ot);font-weight:600}
+.fi.MED .fmsg{color:var(--yt)}.fi.FT .fmsg{color:var(--put);font-weight:600}
+/* Sig table */
+.sigtbl{width:100%;border-collapse:collapse;font-size:12px}
+.sigtbl th{text-align:left;padding:5px 9px;background:var(--s1);color:var(--tx3);font-size:11px;font-weight:800;border-bottom:1px solid var(--bd)}
+.sigtbl td{padding:5px 9px;border-bottom:1px solid var(--bd);vertical-align:top;font-family:var(--mn)}
+.sigtbl tr.brk td{background:var(--rbg)}
+.sold{color:var(--rt);text-decoration:line-through}.snew{color:var(--gt)}
+.brk-b{font-size:10px;padding:1px 6px;border-radius:4px;background:var(--rd);color:#fff;font-weight:800}
+.ok-b{font-size:10px;padding:1px 6px;border-radius:4px;background:var(--ybg);color:var(--yt);border:1px solid var(--yw)}
+/* Experts */
+.expert-grid{display:flex;flex-wrap:wrap;gap:8px}
+.expert-card{display:flex;align-items:center;gap:8px;padding:7px 12px;border-radius:var(--r);border:1px solid var(--bd);background:var(--s1)}
+.expert-avatar{width:28px;height:28px;border-radius:50%;background:var(--s2);overflow:hidden;flex-shrink:0}
+.expert-avatar img{width:100%;height:100%;object-fit:cover}
+.expert-name{font-size:12px;font-weight:700;color:var(--at)}
+.expert-area{font-size:11px;color:var(--tx3)}
+/* discuss */
+.dcard{background:var(--s1);border:1px solid var(--bd);border-radius:var(--r);padding:10px 14px;margin-bottom:6px}
+.dcard-title{font-size:13px;font-weight:700;margin-bottom:4px}
+.dcard-meta{font-size:11px;color:var(--tx3);display:flex;gap:10px;flex-wrap:wrap}
+.dcard-excerpt{font-size:12px;color:var(--tx2);margin-top:6px;line-height:1.6}
+/* label analysis */
+.la-item{display:flex;gap:10px;align-items:flex-start;padding:8px 12px;border-radius:var(--r);background:var(--s1);border:1px solid var(--bd);margin-bottom:5px}
+.la-label{font-size:12px;font-weight:700;padding:2px 9px;border-radius:999px;white-space:nowrap;flex-shrink:0;color:#fff}
+.la-meaning{font-size:13px;font-weight:600}
+.la-signal{font-size:12px;color:var(--tx2);margin-top:2px}
+/* checklist */
+.chklist{display:flex;flex-direction:column;gap:5px}
+.ci{display:flex;align-items:flex-start;gap:10px;padding:7px 11px;border-radius:7px}
+.ci.pass{background:var(--gbg)}.ci.fail{background:var(--rbg)}.ci.warn{background:var(--ybg)}.ci.na{background:var(--s1)}
+.ciico{flex-shrink:0;font-size:15px;font-weight:900;margin-top:1px}
+.ci.pass .ciico{color:var(--gn)}.ci.fail .ciico{color:var(--rd)}.ci.warn .ciico{color:var(--yw)}.ci.na .ciico{color:var(--tx3)}
+.cibody{flex:1}.ciitem{font-size:13px;font-weight:700}
+.ci.pass .ciitem{color:var(--gt)}.ci.fail .ciitem{color:var(--rt)}.ci.warn .ciitem{color:var(--yt)}.ci.na .ciitem{color:var(--tx2)}
+.cinote{font-size:12px;color:var(--tx2);margin-top:2px;font-family:var(--mn);line-height:1.5}
+/* tags */
+.tags{display:flex;flex-wrap:wrap;gap:5px}
+.tag{font-size:12px;padding:2px 10px;border-radius:999px}
+.t-comp{background:var(--ybg);color:var(--yt);border:1px solid var(--yw)}
+.t-lbl{background:var(--abg);color:var(--at);border:1px solid var(--ac)}
+.t-rev{background:var(--gbg);color:var(--gt);border:1px solid var(--gn)}
+/* branch */
+.brgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
+.brcard{border:1px solid var(--bd);border-radius:var(--r);padding:10px 13px}
+.brcard.src{border-color:var(--ac);background:var(--abg)}
+.brcard.ok{border-color:var(--gn);background:var(--gbg)}
+.brcard.need{border-color:var(--yw);background:var(--ybg)}
+.brcard.sec,.brcard.unk{border-color:var(--bd2);background:var(--s1)}
+.brname{font-size:13px;font-weight:800;font-family:var(--mn);margin-bottom:4px}
+.brcard.src .brname{color:var(--at)}.brcard.ok .brname{color:var(--gt)}.brcard.need .brname{color:var(--yt)}.brcard.sec .brname,.brcard.unk .brname{color:var(--tx3)}
+.brnote{font-size:11px;color:var(--tx2);line-height:1.45}
+/* git */
+.gitfile{margin-bottom:14px}
+.gitfn{font-size:11px;font-family:var(--mn);color:var(--tx2);font-weight:700;padding:4px 9px;background:var(--s1);border-radius:5px;margin-bottom:5px;display:flex;align-items:center;gap:8px;border:1px solid var(--bd)}
+.gitc{display:flex;gap:10px;font-size:12px;padding:4px 9px;border-radius:4px;align-items:flex-start}
+.gitc:nth-child(odd){background:var(--s1)}
+.gsha{font-family:var(--mn);color:var(--at);flex-shrink:0;font-weight:700;min-width:62px}
+.gmsg{flex:1;color:var(--tx);line-height:1.4;word-break:break-word}
+.gauthor{color:var(--tx3);white-space:nowrap;flex-shrink:0;font-size:11px;min-width:90px;text-align:right}
+.gdate{color:var(--tx3);font-size:11px;flex-shrink:0;min-width:82px;text-align:right}
+/* actions */
+.acts{display:flex;gap:8px;flex-wrap:wrap;margin-top:1.2rem}
+.act{display:flex;align-items:center;gap:6px;padding:7px 15px;border-radius:var(--r);border:1.5px solid var(--bd2);background:var(--surf);color:var(--tx);font-size:12px;font-weight:700;cursor:pointer;transition:all .12s;text-decoration:none}
+.act:hover{background:var(--s1);border-color:var(--ac);color:var(--at)}
+.empty{font-size:13px;color:var(--tx3);padding:14px;text-align:center;background:var(--s1);border-radius:var(--r)}
+/* need/do */
+.need-do{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:1rem}
+@media(max-width:600px){.need-do{grid-template-columns:1fr}}
+.nd-box{background:var(--s1);border:1px solid var(--bd);border-radius:var(--r2);padding:1rem}
+.nd-title{font-size:13px;font-weight:800;margin-bottom:10px;display:flex;align-items:center;gap:6px}
+.nd-item{font-size:13px;color:var(--tx);padding:5px 0;border-bottom:1px solid var(--bd);display:flex;gap:8px;align-items:flex-start;line-height:1.5}
+.nd-item:last-child{border-bottom:none}
+.nd-ico{flex-shrink:0;font-size:14px;margin-top:1px}
+/* issue signal */
+.signal-card{background:var(--s1);border:1px solid var(--bd);border-radius:var(--r);padding:12px 16px;margin-bottom:8px}
+.signal-header{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.signal-icon{font-size:16px}
+.signal-title{font-size:13px;font-weight:700;flex:1}
+.issue-state{font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px}
+.is-open{background:var(--gbg);color:var(--gt)}.is-closed{background:var(--rbg);color:var(--rt)}
+</style>
+</head>
+<body>
+<div class="wrap">
+<div class="hdr">
+  <div class="logo">&#128300;</div>
+  <h1>CPython Deep Triager</h1>
+  <span class="ver">v5 &middot; Timeline + Signal Intelligence</span>
+</div>
+<p class="sub">
+  Fetches the <strong>full PR timeline</strong> (every label change, comment, review, cross-reference) + <strong>linked issue full history</strong> + <strong>discuss.python.org threads</strong> + <strong>CODEOWNERS expert routing</strong> (from actual <code>.github/CODEOWNERS</code>) + <strong>label signal analysis</strong> &mdash; then synthesises as an experienced CPython maintainer.
+</p>
+<div class="irow">
+  <input type="text" id="pri" placeholder="PR number or github.com/python/cpython/pull/&hellip;" />
+  <button class="rbtn" id="gobtn" onclick="run()">&#128300; Deep Triage</button>
+</div>
+<div class="brow">
+  <span class="blbl">BRANCH</span>
+  <div class="bb on" data-br="main" onclick="sb(this)">main (3.16)</div>
+  <div class="bb" data-br="3.14" onclick="sb(this)">3.14</div>
+  <div class="bb" data-br="3.13" onclick="sb(this)">3.13</div>
+  <div class="bb" data-br="3.12" onclick="sb(this)">3.12</div>
+  <div class="bb" data-br="3.11" onclick="sb(this)">3.11</div>
+  <div class="bb sec" data-br="3.10" onclick="sb(this)">3.10 &#128274;</div>
+</div>
+<div class="chips">
+  <span class="clbl">EXAMPLES</span>
+  <div class="chip" onclick="q('128774')">gh-128774 &middot; asyncio</div>
+  <div class="chip" onclick="q('130039')">gh-130039 &middot; typing</div>
+  <div class="chip" onclick="q('129961')">gh-129961 &middot; pathlib</div>
+  <div class="chip" onclick="q('131591')">gh-131591 &middot; gc</div>
+  <div class="chip" onclick="q('128843')">gh-128843 &middot; docs</div>
+</div>
+<div id="erra"></div>
+<div id="pipea"></div>
+<div id="maina"></div>
+</div>
+<script>
+// ═══════════════════════════════════════════════════════════════════════════
+// CODEOWNERS EXPERT MAP — from actual .github/CODEOWNERS in python/cpython
+// ═══════════════════════════════════════════════════════════════════════════
+const EXPERTS = {
+  rules: [
+    [/^\.github\//,['ezio-melotti','hugovk','AA-Turner','webknjaz','JacobCoffee']],
+    [/^configure/,['erlend-aasland','corona10','AA-Turner','emmatyping']],
+    [/^Makefile\.pre/,['erlend-aasland','AA-Turner','emmatyping']],
+    [/^Modules\/Setup/,['erlend-aasland','AA-Turner','emmatyping']],
+    [/^Doc\/c-api\//,['ZeroIntensity']],
+    [/^Doc\/reference\//,['willingc','AA-Turner']],
+    [/^Doc\//,['AA-Turner','hugovk']],
+    [/^Tools\/clinic\//,['erlend-aasland','AA-Turner']],
+    [/^Misc\/stable_abi/,['encukou']],
+    [/^Tools\/build\/stable_abi/,['encukou']],
+    [/^Platforms\/Android\//,['mhsmith','freakboy3742']],
+    [/^Platforms\/Apple\//,['freakboy3742']],
+    [/^Mac\//,['freakboy3742']],
+    [/^Platforms\/WASI/,['brettcannon','emmatyping','savannahostrowski']],
+    [/^PC\/|^PCbuild\//,['python-windows-team']],
+    [/^Lib\/_ast_unparse|^Lib\/ast|^Parser\/asdl|^Python\/ast/,['isidentical','JelleZijlstra','eclips4','tomasr8']],
+    [/^Objects\/call\.c$/,['markshannon']],
+    [/^Objects\/codeobject/,['markshannon']],
+    [/^Objects\/dict/,['methane','markshannon']],
+    [/^Objects\/frameobject/,['markshannon']],
+    [/genobject/,['markshannon']],
+    [/^Objects\/object\.c$/,['ZeroIntensity']],
+    [/^Objects\/set/,['rhettinger']],
+    [/^Objects\/type(?!var)/,['markshannon']],
+    [/^Objects\/typevarobject/,['JelleZijlstra']],
+    [/^Objects\/unionobject/,['JelleZijlstra']],
+    [/^Python\/bytecodes|^Python\/ceval/,['markshannon']],
+    [/^Tools\/cases_generator\//,['markshannon']],
+    [/^Python\/assemble|^Python\/codegen|^Python\/compile/,['markshannon','iritkatriel']],
+    [/^Python\/flowgraph/,['markshannon','iritkatriel','eclips4']],
+    [/^Python\/symtable/,['JelleZijlstra','carljm']],
+    [/contextvars|hamt/i,['1st1']],
+    [/bltinmodule|sysmodule/,['ericsnowcurrently']],
+    [/^Objects\/exceptions|test_except/,['iritkatriel']],
+    [/pyhash/,['gpshead','picnixz']],
+    [/^Python\/import\.c$/,['brettcannon','ericsnowcurrently','ncoghlan','warsaw','FFY00','kumaraditya303']],
+    [/import/i,['brettcannon','ericsnowcurrently','ncoghlan','warsaw','FFY00']],
+    [/freeze|frozen/,['ericsnowcurrently']],
+    [/^Python\/jit|^Tools\/jit\//,['brandtbucher','savannahostrowski','diegorusso']],
+    [/lazyimport/,['yhg1s','DinoV','pablogsal']],
+    [/optimizer/,['markshannon','Fidget-Spinner']],
+    [/^Grammar\/|^Parser\/|^Tools\/peg_generator\//,['pablogsal','lysnikolaou']],
+    [/^Lib\/tokenize/,['pablogsal','lysnikolaou']],
+    [/gil/i,['ericsnowcurrently']],
+    [/pylifecycle|pystate/,['ericsnowcurrently','ZeroIntensity','FFY00']],
+    [/^Python\/remote_debug|^Modules\/_remote_debugging/,['pablogsal']],
+    [/crossinterp|_interp/,['ericsnowcurrently']],
+    [/interpolationobject|templateobject/,['lysnikolaou']],
+    [/^Lib\/annotationlib/,['JelleZijlstra']],
+    [/^Lib\/argparse/,['savannahostrowski']],
+    [/asyncio/,['1st1','asvetlov','kumaraditya303','willingc']],
+    [/bisect/,['rhettinger']],
+    [/hashlib|hashopenssl|hmac|_ssl/,['gpshead','picnixz']],
+    [/cjkcodecs/,['corona10']],
+    [/^Lib\/collections|_collectionsmodule/,['rhettinger']],
+    [/dataclasses/,['ericvsmith']],
+    [/time\.py|datetime|zoneinfo/,['pganssle','StanFromIreland']],
+    [/^Lib\/dbm|_dbm/,['corona10','erlend-aasland','serhiy-storchaka']],
+    [/mail|smtp|mime|imap|poplib/i,['python-email-team']],
+    [/ensurepip/,['pfmoore','pradyunsg']],
+    [/^Lib\/enum/,['ethanfurman']],
+    [/ftplib/,['giampaolo']],
+    [/functools|_functoolsmodule/,['rhettinger']],
+    [/gcmodule|^Doc\/library\/gc/,['pablogsal']],
+    [/gettext/,['tomasr8']],
+    [/heapq/,['rhettinger']],
+    [/^Lib\/html/,['ezio-melotti']],
+    [/idlelib/,['terryjreedy']],
+    [/importlib/,['jaraco','warsaw','FFY00']],
+    [/itertools/,['rhettinger']],
+    [/^Lib\/logging\//,['vsajip']],
+    [/multiprocessing/,['gpshead']],
+    [/^Lib\/pathlib\//,['barneygale']],
+    [/^Lib\/pdb|^Lib\/bdb/,['gaogaotiantian']],
+    [/^Lib\/pydoc/,['AA-Turner']],
+    [/_pyrepl/,['pablogsal','lysnikolaou','ambv']],
+    [/random|_randommodule/,['rhettinger']],
+    [/shutil/,['giampaolo']],
+    [/sqlite3|_sqlite/,['erlend-aasland']],
+    [/subprocess/,['gpshead']],
+    [/tarfile/,['ethanfurman']],
+    [/tomllib/,['encukou','hauntsaninja']],
+    [/^Lib\/typing/,['JelleZijlstra','AlexWaygood']],
+    [/^Lib\/types\.py|_typesmodule/,['AA-Turner']],
+    [/unittest\/mock/,['cjw296']],
+    [/weakref/,['kumaraditya303']],
+    [/zlib|_zlibmodule/,['StanFromIreland']],
+    [/^Lib\/compression\/zstd|^Modules\/_zstd/,['AA-Turner','emmatyping']],
+    [/stackref/,['Fidget-Spinner']],
+  ],
+  profiles: {
+    'markshannon':      {area:'Bytecode, eval loop, compiler, dict, frame, type objects'},
+    'JelleZijlstra':    {area:'Typing, annotations, AST, type params, union types'},
+    'ericsnowcurrently':{area:'Runtime state, subinterpreters, import system, GIL'},
+    'brettcannon':      {area:'Import system, devguide, WASI'},
+    '1st1':             {area:'asyncio, contextvars, HAMT'},
+    'asvetlov':         {area:'asyncio'},
+    'kumaraditya303':   {area:'asyncio, weakref, import'},
+    'rhettinger':       {area:'collections, functools, itertools, random, heapq, set, bisect'},
+    'iritkatriel':      {area:'Exceptions, compiler (assemble/codegen/flowgraph)'},
+    'erlend-aasland':   {area:'SQLite, build system, Argument Clinic'},
+    'pablogsal':        {area:'Grammar/PEG, GC, remote debug, profiling, PyREPL'},
+    'gpshead':          {area:'ssl, hashlib, multiprocessing, subprocess, socket'},
+    'picnixz':          {area:'ssl, hashlib, cryptographic primitives'},
+    'AA-Turner':        {area:'Docs, build, types, pydoc, zstd'},
+    'encukou':          {area:'Stable ABI, tomllib, Limited C API'},
+    'barneygale':       {area:'pathlib'},
+    'ericvsmith':       {area:'dataclasses'},
+    'ZeroIntensity':    {area:'C API docs, object.c, runtime lifecycle'},
+    'brandtbucher':     {area:'JIT, pattern matching'},
+    'savannahostrowski':{area:'JIT, WASI, argparse, GitHub Actions'},
+    'lysnikolaou':      {area:'Grammar/PEG, t-strings, tokenize, PyREPL'},
+    'eclips4':          {area:'AST, flowgraph'},
+    'tomasr8':          {area:'AST, gettext, optimizer'},
+    'isidentical':      {area:'AST'},
+    'methane':          {area:'dict objects'},
+    'ncoghlan':         {area:'Import system, PEPs, devguide'},
+    'warsaw':           {area:'Import system, importlib, site'},
+    'FFY00':            {area:'Build, getpath, sysconfig, importlib, WASI'},
+    'emmatyping':       {area:'Build, WASI, Emscripten, zstd'},
+    'corona10':         {area:'CJK codecs, dbm, build'},
+    'vsajip':           {area:'logging, venv'},
+    'pganssle':         {area:'datetime, time, zoneinfo'},
+    'StanFromIreland':  {area:'turtle, zlib, datetime docs'},
+    'gaogaotiantian':   {area:'pdb, bdb, remote pdb'},
+    'ezio-melotti':     {area:'html, GitHub config, docs'},
+    'hugovk':           {area:'colorize, GitHub config, docs'},
+    'giampaolo':        {area:'shutil, ftplib'},
+    'jaraco':           {area:'configparser, importlib resources/metadata'},
+    'ethanfurman':      {area:'enum, tarfile'},
+    'AlexWaygood':      {area:'typing'},
+    'willingc':         {area:'asyncio docs, reference docs'},
+    'carljm':           {area:'symtable'},
+    'ambv':             {area:'PyREPL (Lukasz Langa)'},
+    'sethmlarson':      {area:'SBOM, supply chain security'},
+    'serhiy-storchaka': {area:'many stdlib modules'},
+    'Fidget-Spinner':   {area:'Tier-2 optimizer, stackref'},
+    'mhsmith':          {area:'Android'},
+    'freakboy3742':     {area:'iOS, Android, Emscripten'},
+    'diegorusso':       {area:'JIT'},
+    'yhg1s':            {area:'Lazy imports'},
+    'DinoV':            {area:'Lazy imports'},
+    'hauntsaninja':     {area:'tomllib'},
+    'pfmoore':          {area:'ensurepip, pip'},
+    'pradyunsg':        {area:'ensurepip, pip'},
+    'cjw296':           {area:'unittest.mock'},
+    'terryjreedy':      {area:'IDLE, turtle'},
+  },
+  resolve(files) {
+    const seen=new Set(),res=[];
+    for(const f of files)
+      for(const [pat,users] of this.rules)
+        if(pat.test(f.filename))
+          for(const u of users)
+            if(!seen.has(u)){seen.add(u);res.push({user:u,file:f.filename,info:this.profiles[u]||{area:'CPython expert'}});}
+    return res.slice(0,12);
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// LABEL KNOWLEDGE BASE — CPython label taxonomy
+// ═══════════════════════════════════════════════════════════════════════════
+const LABELS = {
+  'type-bug':         {color:'d73a4a',meaning:'Confirmed bug fix',signal:'Issue accepted as a real bug — PR likely to merge if implementation is correct'},
+  'type-feature':     {color:'a2eeef',meaning:'New feature',signal:'Needs community buy-in — check for PEP or discuss.python.org discussion'},
+  'type-enhancement': {color:'84b6eb',meaning:'Enhancement to existing behavior',signal:'Lower bar than features but still needs compat analysis'},
+  'type-crash':       {color:'e11d48',meaning:'Interpreter crash',signal:'HIGH PRIORITY — crashes fast-tracked for backport to all stable branches'},
+  'type-security':    {color:'b91c1c',meaning:'Security issue (CVE)',signal:'CRITICAL — coordinate with security team before public disclosure'},
+  'awaiting merge':   {color:'0e8a16',meaning:'Review complete, waiting to merge',signal:'All reviewers approved — verify CI green, then merge'},
+  'awaiting changes': {color:'e6e6e6',meaning:'Author must address feedback',signal:'BLOCKED on author — do not merge; wait for author push'},
+  'awaiting change review':{color:'e6e6e6',meaning:'Author updated, needs re-review',signal:'Author addressed feedback — reviewer should re-check changes'},
+  'DO-NOT-MERGE':     {color:'b60205',meaning:'Explicitly blocked',signal:'DO NOT MERGE — read the reason in comments before any action'},
+  'skip news':        {color:'cfd3d7',meaning:'No NEWS entry required',signal:'Trivial change — maintainer waived NEWS requirement'},
+  'needs-backport-to-3.14':{color:'e4e669',meaning:'Backport 3.14',signal:'miss-islington bot will auto-create backport PR when this label is added'},
+  'needs-backport-to-3.13':{color:'e4e669',meaning:'Backport 3.13',signal:'miss-islington bot will auto-create backport PR'},
+  'needs-backport-to-3.12':{color:'e4e669',meaning:'Backport 3.12',signal:'miss-islington bot auto-creates — verified important bug fix'},
+  'needs-backport-to-3.11':{color:'e4e669',meaning:'Backport 3.11',signal:'miss-islington bot auto-creates — older stable release'},
+  'needs-backport-to-3.10':{color:'e4e669',meaning:'Backport 3.10 (security-only)',signal:'ONLY if this is a security/CVE fix — 3.10 is security-only branch'},
+  'expert-asyncio':   {color:'0075ca',meaning:'Needs asyncio expert',signal:'Routes to @1st1 @asvetlov @kumaraditya303 @willingc — wait for their review'},
+  'expert-typing':    {color:'0075ca',meaning:'Needs typing expert',signal:'Routes to @JelleZijlstra @AlexWaygood — wait for their review'},
+  'sprint':           {color:'7057ff',meaning:'Good sprint task',signal:'Lower complexity — appropriate for sprint or new contributors'},
+  'easy':             {color:'7fc97f',meaning:'Good first issue',signal:'Simple fix — still review carefully, be encouraging'},
+  'deferred-blocker': {color:'e11d48',meaning:'Blocks a release',signal:'Release manager watching — HIGH PRIORITY, escalate if stalled'},
+  'release-blocker':  {color:'b60205',meaning:'Blocks release',signal:'CRITICAL — must resolve before release, escalate immediately'},
+};
+
+function analyzeLabels(labels) {
+  return labels.map(l=>{
+    const info=LABELS[l.name]||{meaning:'Custom label',signal:'Check devguide.python.org for meaning'};
+    return {...info,name:l.name,color:l.color||'888'};
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CPython KB (from actual 3.16-main repo)
+// ═══════════════════════════════════════════════════════════════════════════
+const KB = {
+  version:'3.16-main',bytecodes:93,stable_abi:1247,tests:393,
+  news_cats:['Build','C_API','Core_and_Builtins','Documentation','IDLE','Library','Security','Tests','Tools-Demos','Windows','macOS'],
+  branches:{
+    'main':{ver:'3.16',status:'development',sec_only:false},
+    '3.14':{ver:'3.14',status:'prerelease',sec_only:false},
+    '3.13':{ver:'3.13',status:'stable',sec_only:false},
+    '3.12':{ver:'3.12',status:'stable',sec_only:false},
+    '3.11':{ver:'3.11',status:'stable',sec_only:false},
+    '3.10':{ver:'3.10',status:'security',sec_only:true},
+  },
+  layout:[
+    [/^Python\/ceval\.c$/,'core/eval-loop','Core_and_Builtins','Lib/test/test_ceval.py',true],
+    [/^Python\/bytecodes\.c$/,'core/bytecodes','Core_and_Builtins',null,true],
+    [/^Python\/compile\.c$/,'core/compiler','Core_and_Builtins','Lib/test/test_compile.py',false],
+    [/^Python\/ast/,'core/ast','Core_and_Builtins','Lib/test/test_ast/',false],
+    [/^Python\/symtable/,'core/symtable','Core_and_Builtins','Lib/test/test_symtable.py',false],
+    [/^Python\/gc\.c$/,'core/gc','Core_and_Builtins','Lib/test/test_gc.py',true],
+    [/^Python\/import\.c$/,'core/import','Core_and_Builtins','Lib/test/test_import/',true],
+    [/^Python\/bltinmodule/,'core/builtins','Core_and_Builtins','Lib/test/test_builtin.py',false],
+    [/^Python\/sysmodule/,'core/sys','Core_and_Builtins','Lib/test/test_sys.py',false],
+    [/^Python\/crossinterp/,'core/subinterpreters','Core_and_Builtins','Lib/test/test_interpreters/',true],
+    [/^Python\/context/,'core/contextvars','Core_and_Builtins','Lib/test/test_contextvars.py',true],
+    [/^Python\/critical_section/,'core/critical-section','Core_and_Builtins',null,true],
+    [/^Python\/jit/,'core/jit','Core_and_Builtins',null,false],
+    [/^Python\//,'core/interpreter','Core_and_Builtins',null,false],
+    [/^Objects\/longobject/,'objects/int','Core_and_Builtins','Lib/test/test_int.py',true],
+    [/^Objects\/unicodeobject/,'objects/str','Core_and_Builtins','Lib/test/test_unicode.py',true],
+    [/^Objects\/listobject/,'objects/list','Core_and_Builtins','Lib/test/test_list.py',true],
+    [/^Objects\/dictobject/,'objects/dict','Core_and_Builtins','Lib/test/test_dict.py',true],
+    [/^Objects\/typeobject/,'objects/type','Core_and_Builtins','Lib/test/test_type.py',true],
+    [/^Objects\/exceptions/,'objects/exceptions','Core_and_Builtins','Lib/test/test_exceptions.py',false],
+    [/^Objects\/frameobject/,'objects/frame','Core_and_Builtins','Lib/test/test_frame.py',true],
+    [/^Objects\/genobject/,'objects/generator','Core_and_Builtins','Lib/test/test_generators.py',true],
+    [/^Objects\/funcobject/,'objects/function','Core_and_Builtins',null,true],
+    [/^Objects\/bytesobject/,'objects/bytes','Core_and_Builtins','Lib/test/test_bytes.py',false],
+    [/^Objects\/setobject/,'objects/set','Core_and_Builtins','Lib/test/test_set.py',true],
+    [/^Objects\/typevarobject/,'objects/typevar','Core_and_Builtins','Lib/test/test_type_params.py',false],
+    [/^Objects\/interpolationobject/,'objects/interpolation','Core_and_Builtins',null,false],
+    [/^Objects\/templateobject/,'objects/template','Core_and_Builtins',null,false],
+    [/^Objects\/lazyimportobject/,'objects/lazy-import','Core_and_Builtins','Lib/test/test_lazy_import/',false],
+    [/^Objects\//,'core/objects','Core_and_Builtins',null,false],
+    [/^Modules\/_asynciomodule/,'modules/_asyncio','Library','Lib/test/test_asyncio/',true],
+    [/^Modules\/_io\//,'modules/_io','Library','Lib/test/test_io/',true],
+    [/^Modules\/_ssl/,'modules/ssl','Security','Lib/test/test_ssl.py',false],
+    [/^Modules\/_json/,'modules/_json','Library','Lib/test/test_json/',false],
+    [/^Modules\/_pickle/,'modules/_pickle','Library','Lib/test/test_pickle.py',false],
+    [/^Modules\/_ctypes\//,'modules/_ctypes','Library','Lib/test/test_ctypes/',false],
+    [/^Modules\/_decimal\//,'modules/_decimal','Library','Lib/test/test_decimal.py',false],
+    [/^Modules\/_sqlite\//,'modules/_sqlite','Library','Lib/test/test_sqlite3/',false],
+    [/^Modules\/posixmodule/,'modules/os','Library','Lib/test/test_os/',true],
+    [/^Modules\/socketmodule/,'modules/socket','Library','Lib/test/test_socket.py',true],
+    [/^Modules\/_threadmodule/,'modules/_thread','Library','Lib/test/test_thread.py',true],
+    [/^Modules\/_collectionsmodule/,'modules/_collections','Library','Lib/test/test_collections.py',true],
+    [/^Modules\/_functoolsmodule/,'modules/_functools','Library','Lib/test/test_functools.py',false],
+    [/^Modules\/_interpretersmodule/,'modules/_interpreters','Core_and_Builtins','Lib/test/test_interpreters/',true],
+    [/^Modules\//,'modules/c-extension','Library',null,false],
+    [/^Lib\/asyncio\//,'stdlib/asyncio','Library','Lib/test/test_asyncio/',true],
+    [/^Lib\/typing\.py$/,'stdlib/typing','Library','Lib/test/test_typing.py',false],
+    [/^Lib\/annotationlib/,'stdlib/annotationlib','Library','Lib/test/test_annotationlib.py',false],
+    [/^Lib\/dataclasses/,'stdlib/dataclasses','Library','Lib/test/test_dataclasses/',false],
+    [/^Lib\/pathlib\//,'stdlib/pathlib','Library','Lib/test/test_pathlib/',false],
+    [/^Lib\/functools/,'stdlib/functools','Library','Lib/test/test_functools.py',false],
+    [/^Lib\/contextlib/,'stdlib/contextlib','Library','Lib/test/test_contextlib.py',false],
+    [/^Lib\/collections\//,'stdlib/collections','Library','Lib/test/test_collections.py',false],
+    [/^Lib\/importlib\//,'stdlib/importlib','Library','Lib/test/test_importlib/',true],
+    [/^Lib\/concurrent\//,'stdlib/concurrent','Library','Lib/test/test_concurrent_futures/',true],
+    [/^Lib\/unittest\//,'stdlib/unittest','Library','Lib/test/test_unittest/',false],
+    [/^Lib\/logging\//,'stdlib/logging','Library','Lib/test/test_logging.py',true],
+    [/^Lib\/email\//,'stdlib/email','Library','Lib/test/test_email/',false],
+    [/^Lib\/compression\//,'stdlib/compression','Library','Lib/test/test_bz2.py',false],
+    [/^Lib\/sqlite3\//,'stdlib/sqlite3','Library','Lib/test/test_sqlite3/',false],
+    [/^Lib\/test\//,'tests','Tests',null,false],
+    [/^Lib\//,'stdlib/python','Library',null,false],
+    [/^Include\/internal\//,'c-api/internal','C_API',null,false],
+    [/^Include\/cpython\//,'c-api/cpython','C_API',null,false],
+    [/^Include\//,'c-api/public','C_API',null,false],
+    [/^Misc\/stable_abi/,'stable-abi','C_API',null,false],
+    [/^Misc\/NEWS\.d\//,'changelog',null,null,false],
+    [/^Grammar\//,'grammar','Core_and_Builtins',null,false],
+    [/^Parser\//,'parser','Core_and_Builtins',null,false],
+    [/^Doc\//,'documentation','Documentation',null,false],
+    [/^Tools\/clinic\//,'tools/clinic','Tools-Demos','Lib/test/test_clinic.py',false],
+    [/^Tools\/cases_generator\//,'tools/cases-gen','Tools-Demos',null,false],
+    [/^Tools\/jit\//,'tools/jit','Tools-Demos',null,false],
+    [/^PC\/|^PCbuild\//,'platform/windows','Windows',null,false],
+    [/^Mac\//,'platform/macos','macOS',null,false],
+    [/^Platforms\//,'platform','Build',null,false],
+    [/^configure/,'build/configure','Build',null,false],
+  ],
+};
+
+function classify(fname){
+  for(const [pat,sub,news,test,ft] of KB.layout)
+    if(pat.test(fname))return{sub,news,test,ft};
+  return{sub:fname.split('/')[0]||'unknown',news:'Library',test:null,ft:false};
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STATIC ANALYSIS ENGINE
+// ═══════════════════════════════════════════════════════════════════════════
+function analyze(files){
+  const R={sig:[],api:[],c:[],py:[],rc:[],sec:[],plat:[],edge:[],tgaps:[],tneeded:[],newsmiss:[],ft:[],abi:[],grammar:[],sum:{}};
+  const testInPR=files.filter(f=>/test/i.test(f.filename)).map(f=>f.filename);
+  const newsInPR=files.filter(f=>/NEWS\.d/.test(f.filename));
+  for(const f of files){
+    const fn=f.filename,patch=f.patch||'';
+    const add=patch.split('\n').filter(l=>l.startsWith('+')&&!l.startsWith('+++')).map(l=>l.slice(1)).join('\n');
+    const rem=patch.split('\n').filter(l=>l.startsWith('-')&&!l.startsWith('---')).map(l=>l.slice(1)).join('\n');
+    const r=classify(fn);
+    const isC=/\.(c|h)$/.test(fn),isPy=/\.py$/.test(fn),isTest=/test/i.test(fn),isDoc=/^Doc\//.test(fn);
+    if(/^Grammar\//.test(fn))R.grammar.push(fn);
+    if(!isTest&&!isDoc&&r.news){
+      if(r.test){const tb=r.test.replace(/^Lib\/test\//,'').replace(/\/$|\.py$/,'');if(!testInPR.some(t=>t.includes(tb.replace(/\*.*/,''))))R.tneeded.push({file:fn,expected:r.test,sub:r.sub});}
+      if(!newsInPR.length&&add.length>40&&!R.newsmiss.some(x=>x.cat===r.news))R.newsmiss.push({file:fn,cat:r.news,sub:r.sub});
+      if(r.ft&&/PyThread_|_Py_CRITICAL_SECTION|Py_BEGIN_ALLOW_THREADS|threading\.|global\s+\w/.test(add))R.ft.push({file:fn,sub:r.sub});
+      if(/^Include\/(?!internal\/|cpython\/)/.test(fn)&&fn.endsWith('.h'))R.abi.push({file:fn,note:'Public header changed -> run Tools/build/stable_abi.py (1,247 ABI items)'});
+    }
+    if(fn.startsWith('Grammar/'))R.abi.push({file:fn,note:'Grammar changed -> make regen-pegen && make regen-all'});
+    if(isPy){
+      const os={},ns={};
+      for(const m of rem.matchAll(/def\s+(\w+)\s*\(([^)]*)\)/g))os[m[1]]=m[2].replace(/\s+/g,' ').trim();
+      for(const m of add.matchAll(/def\s+(\w+)\s*\(([^)]*)\)/g))ns[m[1]]=m[2].replace(/\s+/g,' ').trim();
+      for(const name of Object.keys(os)){
+        if(ns[name]!==undefined&&os[name]!==ns[name]){
+          const o=os[name],n=ns[name];
+          const sl=n.includes('/')&&!o.includes('/'),st=/\*[,\s]/.test(n)&&!/\*[,\s]/.test(o);
+          const op=new Set((o.match(/\b([a-z_]\w*)\b/g)||[]).filter(p=>!['self','cls'].includes(p)));
+          const np=new Set((n.match(/\b([a-z_]\w*)\b/g)||[]).filter(p=>!['self','cls'].includes(p)));
+          const rp=[...op].filter(p=>!np.has(p)),ap=[...np].filter(p=>!op.has(p));
+          let bt='changed',brk=false;
+          if(sl){bt='positional-only (/ added) - keyword callers break';brk=true;}
+          else if(st){bt='keyword-only (* added) - positional callers break';brk=true;}
+          else if(rp.length){bt=`param removed: ${rp.join(', ')}`;brk=true;}
+          else if(ap.length&&!ap.every(p=>n.split(',').some(s=>s.includes(p)&&s.includes('=')))){bt=`required param added: ${ap.join(', ')}`;brk=true;}
+          R.sig.push({file:fn,func:name,old:o,new:n,bt,brk,pub:!name.startsWith('_')});
+          if(brk&&!name.startsWith('_'))R.api.push({file:fn,func:name,reason:bt});
+        }
+      }
+      if(!isTest){
+        if(/except\s*:/.test(add))R.py.push({file:fn,issue:'Bare except: catches BaseException incl. KeyboardInterrupt',sev:'HIGH'});
+        if(/def\s+\w+[^)]*(?:\[\s*\]|\{\s*\})\s*[,)=]/.test(add))R.py.push({file:fn,issue:'Mutable default argument - shared across calls',sev:'HIGH'});
+        if(/\bassert\s+/.test(add))R.py.push({file:fn,issue:'assert in non-test code - stripped by python -O',sev:'MED'});
+        if(/\bglobal\s+\w/.test(add))R.py.push({file:fn,issue:'global statement - free-thread unsafe',sev:'MED'});
+        if(/print\s*\(/.test(add))R.py.push({file:fn,issue:'print() in non-test code - debug artifact?',sev:'LOW'});
+        if(/DeprecationWarning(?!.*stacklevel=)/.test(add))R.py.push({file:fn,issue:'DeprecationWarning without stacklevel=',sev:'MED'});
+        const fns=[...(add.matchAll(/^def\s+([a-z]\w+)\s*\(/gm)||[])].map(m=>m[1]);
+        for(const fn2 of fns){if(!testInPR.some(t=>{const d=files.find(x=>x.filename===t);return d&&(d.patch||'').includes(fn2);}))R.tgaps.push({func:fn2,file:fn});}
+      }
+    }
+    if(isC){
+      const cp=[
+        [/sprintf\s*\(/,'sprintf() - use PyOS_snprintf()','CRIT'],
+        [/\bgets\s*\(/,'gets() - never safe','CRIT'],
+        [/strcpy\s*\(/,'strcpy() - buffer overflow','CRIT'],
+        [/Py_BEGIN_ALLOW_THREADS(?![\s\S]{0,600}?Py_END_ALLOW_THREADS)/,'Py_BEGIN_ALLOW_THREADS without END','CRIT'],
+        [/(?<!\w)malloc\s*\(/,'raw malloc() - use PyMem_Malloc()','HIGH'],
+        [/(?<!\w)free\s*\(/,'raw free() - use PyMem_Free()','HIGH'],
+        [/(?<!\w)realloc\s*\(/,'raw realloc() - use PyMem_Realloc()','HIGH'],
+        [/Py_DECREF\s*\(/,'Py_DECREF - verify non-NULL first','HIGH'],
+        [/\b_Py_[A-Z]\w+/,'Internal _Py_ API - unstable','MED'],
+        [/PyErr_Clear\s*\(\s*\)/,'PyErr_Clear() - silently hides exceptions','MED'],
+      ];
+      for(const [pat,msg,sev] of cp)if(pat.test(add))R.c.push({file:fn,issue:msg,sev});
+      const inc=(add.match(/\bPy_INCREF\b/g)||[]).length,dec=(add.match(/\bPy_DECREF\b|\bPy_XDECREF\b/g)||[]).length;
+      if(inc>dec+1)R.rc.push({file:fn,inc,dec,note:`${inc} INCREF vs ${dec} DECREF - potential leak`});
+    }
+    for(const [pat,msg] of [
+      [/\beval\s*\(/,'eval() - code execution'],
+      [/\bexec\s*\(/,'exec() - code execution'],
+      [/pickle\.loads?\b/,'pickle.load() - code exec if untrusted'],
+      [/shell\s*=\s*True/,'subprocess shell=True - injection'],
+      [/hashlib\.(md5|sha1)\b/,'MD5/SHA1 - cryptographically broken'],
+    ])if(pat.test(add))R.sec.push({file:fn,issue:msg});
+    for(const [pat,msg] of [
+      [/os\.sep\b/,'hardcoded path sep - Windows vs POSIX'],
+      [/\/tmp\//,'hardcoded /tmp - fails on Windows'],
+    ])if(pat.test(add))R.plat.push({file:fn,risk:msg});
+    const ep=[
+      [/def\s+\w+[^)]*\bstr\b/,['empty string ""','Unicode surrogates','null bytes \\x00']],
+      [/async def|await\s+/,['CancelledError mid-await','event loop closed','concurrent re-entry']],
+      [/open\s*\(|pathlib\./,['file not found','permission denied','symlink loop']],
+      [/threading\./,['race condition','deadlock','daemon thread shutdown']],
+    ];
+    for(const [pat,cases] of ep)if(pat.test(add))for(const c of cases)R.edge.push({file:fn,case:c});
+  }
+  R.edge=[...new Map(R.edge.map(e=>[e.case,e])).values()].slice(0,14);
+  R.plat=[...new Map(R.plat.map(r=>[r.risk,r])).values()];
+  R.py=[...new Map(R.py.map(r=>[r.issue,r])).values()];
+  R.tneeded=[...new Map(R.tneeded.map(r=>[r.expected,r])).values()];
+  R.ft=[...new Map(R.ft.map(r=>[r.file,r])).values()];
+  const crits=R.c.filter(x=>x.sev==='CRIT').length+R.sec.length;
+  const highs=R.c.filter(x=>x.sev==='HIGH').length+R.api.length;
+  R.sum={crits,highs,api:R.api.length,rc:R.rc.filter(x=>x.inc>x.dec).length,sec:R.sec.length,ft:R.ft.length,abi:R.abi.length,news:R.newsmiss.length,tgaps:R.tgaps.length,edge:R.edge.length,plat:R.plat.length,gram:R.grammar.length};
+  return R;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// UI HELPERS
+// ═══════════════════════════════════════════════════════════════════════════
+const $=id=>document.getElementById(id);
+const esc=s=>String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+let selBr='main';
+function sb(el){document.querySelectorAll('.bb').forEach(b=>b.classList.remove('on'));el.classList.add('on');selBr=el.dataset.br;}
+function q(n){$('pri').value=n;run();}
+function parseNum(v){const m=v.trim().match(/(\d{4,8})\s*$/)||v.trim().match(/^(\d+)$/);return m?m[1]:null;}
+function showErr(m){$('erra').innerHTML=`<div class="err">&#9888; ${esc(m)}</div>`;}
+function clearErr(){$('erra').innerHTML='';}
+
+const STEPS=[
+  {id:'pr',   lbl:'PR metadata + reviews'},
+  {id:'tl',   lbl:'Full PR timeline'},
+  {id:'files',lbl:'Diff & patches'},
+  {id:'hist', lbl:'Git history (10 commits/file)'},
+  {id:'issue',lbl:'Linked issue + full history'},
+  {id:'peps', lbl:'PEP metadata'},
+  {id:'disc', lbl:'discuss.python.org'},
+  {id:'br',   lbl:'Multi-branch backport check'},
+  {id:'sta',  lbl:'Static analysis engine'},
+  {id:'ai',   lbl:'Deep AI synthesis'},
+];
+let SS={};
+function initPipe(){SS={};STEPS.forEach(s=>SS[s.id]={st:'idle',cnt:''});renderPipe();}
+function setStep(id,st,cnt=''){SS[id]={st,cnt};renderPipe();}
+function renderPipe(){
+  const rows=STEPS.map(s=>{
+    const x=SS[s.id]||{};
+    const dot=x.st==='done'?'<div class="sdot done">&#10003;</div>':x.st==='run'?'<div class="sdot run"></div>':x.st==='skip'?'<div class="sdot skip">-</div>':x.st==='fail'?'<div class="sdot fail">&#10007;</div>':'<div class="sdot"></div>';
+    const badge=x.cnt?`<span class="scnt ${x.st==='done'?'sc-ok':x.cnt.includes('!')?'sc-bad':'sc-na'}">${esc(x.cnt)}</span>`:'';
+    return `<div class="step ${x.st==='run'?'run':''}">${dot}<span class="slbl ${x.st}">${esc(s.lbl)}</span>${badge}</div>`;
+  }).join('');
+  $('pipea').innerHTML=`<div class="pipeline"><div class="phdr">&#9889; INTELLIGENCE PIPELINE</div><div class="pgrid">${rows}</div></div>`;
+}
+
+const GH='https://api.github.com/repos/python/cpython';
+async function ghGet(p){const r=await fetch(`${GH}${p}`,{headers:{Accept:'application/vnd.github.v3+json'}});if(!r.ok)throw new Error(`GitHub ${r.status}: ${p}`);return r.json();}
+async function ghSafe(p){try{return await ghGet(p);}catch{return null;}}
+
+function refs(txt=''){return{
+  issues:[...new Set([...(txt.matchAll(/(?:gh-|#|fixes?\s+#|closes?\s+#|resolves?\s+#)(\d{3,7})/gi)||[])].map(m=>m[1]))],
+  peps:[...new Set([...(txt.matchAll(/\bpep[- ]?(\d{3,4})\b/gi)||[])].map(m=>m[1]))],
+  discs:[...(txt.matchAll(/discuss\.python\.org\/t\/([\w\d/_.%-]+)/gi)||[])].map(m=>m[1]),
+};}
+
+const BOTS=new Set(['miss-islington','bedevere-bot','github-actions[bot]','python-triage-bot','dependabot[bot]']);
+
+async function fetchTimeline(num){
+  // Fetch issue timeline (labels, events) + comments + reviews + inline review comments in parallel
+  const [tl,cmts,reviews,rcmts]=await Promise.all([
+    ghSafe(`/issues/${num}/timeline?per_page=100`),
+    ghSafe(`/issues/${num}/comments?per_page=50`),
+    ghSafe(`/pulls/${num}/reviews?per_page=50`),
+    ghSafe(`/pulls/${num}/comments?per_page=50`),
+  ]);
+  const items=[];
+  // Events from timeline (labels, merge, close, cross-refs, assignments, milestones)
+  for(const ev of (tl||[])){
+    const login=ev.actor?.login||'?';
+    const date=ev.created_at||'';
+    const type=ev.event||'';
+    if(['labeled','unlabeled','closed','merged','referenced','cross-referenced','connected','assigned','review_requested','milestoned'].includes(type)){
+      items.push({kind:type,login,isBot:BOTS.has(login),date,ev});
+    }
+  }
+  // Issue comments
+  for(const c of (cmts||[])){
+    if(!BOTS.has(c.user?.login||''))
+      items.push({kind:'comment',login:c.user?.login||'?',isBot:false,date:c.created_at||'',body:c.body,url:c.html_url});
+  }
+  // PR reviews
+  for(const r of (reviews||[])){
+    if(!BOTS.has(r.user?.login||'')&&(r.body||r.state!=='COMMENTED'))
+      items.push({kind:'review',login:r.user?.login||'?',isBot:false,date:r.submitted_at||'',body:r.body,state:r.state,url:r.html_url});
+  }
+  // Inline review comments (first 20)
+  for(const c of (rcmts||[]).slice(0,20)){
+    if(!BOTS.has(c.user?.login||''))
+      items.push({kind:'inline',login:c.user?.login||'?',isBot:false,date:c.created_at||'',body:c.body,path:c.path,url:c.html_url});
+  }
+  items.sort((a,b)=>a.date.localeCompare(b.date));
+  return items;
+}
+
+async function fetchIssueHistory(issueNums){
+  const out=[];
+  for(const num of issueNums.slice(0,4)){
+    const [issue,cmts,tl]=await Promise.all([
+      ghSafe(`/issues/${num}`),
+      ghSafe(`/issues/${num}/comments?per_page=20`),
+      ghSafe(`/issues/${num}/timeline?per_page=50`),
+    ]);
+    if(!issue)continue;
+    const humanCmts=(cmts||[]).filter(c=>!BOTS.has(c.user?.login||'')).slice(0,8);
+    const labelEvs=(tl||[]).filter(e=>e.event==='labeled');
+    out.push({
+      num,title:issue.title,state:issue.state,url:issue.html_url,
+      body:(issue.body||'').slice(0,800),
+      labels:issue.labels||[],
+      created:issue.created_at?.slice(0,10)||'',
+      comments_count:issue.comments||0,
+      humanComments:humanCmts.map(c=>({login:c.user?.login||'?',body:(c.body||'').slice(0,400),date:c.created_at?.slice(0,10)||''})),
+      labelHistory:labelEvs.map(e=>({label:e.label?.name||'?',actor:e.actor?.login||'?',date:e.created_at?.slice(0,10)||''})),
+    });
+  }
+  return out;
+}
+
+async function checkBranches(num){
+  const out={};
+  for(const [br,info] of Object.entries(KB.branches)){
+    if(br==='main'){out[br]={cls:'src',note:'Source branch'};continue;}
+    try{
+      const r=await fetch(`https://api.github.com/search/issues?q=repo:python/cpython+is:pr+base:${br}+"${num}"&per_page=3`);
+      if(r.ok){const d=await r.json();
+        if(d.total_count>0)out[br]={cls:'ok',note:`Backport #${d.items[0].number}`,url:d.items[0].html_url};
+        else out[br]={cls:info.sec_only?'sec':'need',note:info.sec_only?'Security-only':'No backport'};
+      }else out[br]={cls:'unk',note:'Could not check'};
+    }catch{out[br]={cls:'unk',note:'Rate limit'};}
+  }
+  return out;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MAIN RUN
+// ═══════════════════════════════════════════════════════════════════════════
+async function run(){
+  const num=parseNum($('pri').value);
+  clearErr();if(!num){showErr('Enter a CPython PR number or URL.');return;}
+  const btn=$('gobtn');btn.disabled=true;
+  $('maina').innerHTML='';initPipe();
+  const ctx={num};
+  try{
+    setStep('pr','run');
+    const pr=await ghGet(`/pulls/${num}`);ctx.pr=pr;
+    const prTxt=[pr.title,pr.body||'',(pr.labels||[]).map(l=>l.name).join(' ')].join('\n');
+    setStep('pr','done',pr.state);
+
+    setStep('tl','run');
+    const timeline=await fetchTimeline(num);ctx.timeline=timeline;
+    const humanTL=timeline.filter(x=>!x.isBot);
+    setStep('tl','done',`${humanTL.length} events`);
+
+    setStep('files','run');
+    const files=await ghSafe(`/pulls/${num}/files?per_page=100`)||[];ctx.files=files;
+    const adds=files.reduce((s,f)=>s+f.additions,0),dels=files.reduce((s,f)=>s+f.deletions,0);
+    setStep('files','done',`${files.length}f`);
+
+    setStep('hist','run');
+    const top=[...files].sort((a,b)=>(b.changes||0)-(a.changes||0)).slice(0,5);
+    const hist={};
+    for(const f of top){
+      const cs=await ghSafe(`/commits?path=${encodeURIComponent(f.filename)}&per_page=10&sha=${selBr}`)||[];
+      if(cs.length)hist[f.filename]=cs.slice(0,10).map(c=>({sha:c.sha.slice(0,8),msg:(c.commit?.message||'').split('\n')[0].slice(0,110),author:c.commit?.author?.name||'?',date:(c.commit?.author?.date||'').slice(0,10)}));
+    }
+    ctx.hist=hist;
+    setStep('hist','done',`${Object.values(hist).reduce((s,a)=>s+a.length,0)} commits`);
+
+    setStep('issue','run');
+    const allTxt=prTxt+'\n'+humanTL.filter(x=>x.body).map(x=>x.body).join('\n');
+    const allRefs=refs(allTxt);ctx.refs=allRefs;
+    const issNums=[...new Set([...refs(prTxt).issues,...allRefs.issues])].filter(i=>i!==num);
+    const issueCtx=await fetchIssueHistory(issNums);ctx.issues=issueCtx;
+    setStep('issue','done',`${issueCtx.length} issues`);
+
+    setStep('peps','run');
+    const filePeps=refs(files.map(f=>f.filename).join('\n')).peps;
+    const allPeps=[...new Set([...allRefs.peps,...filePeps])].slice(0,6);
+    const peps=[];
+    for(const p of allPeps){
+      try{const r=await fetch(`https://peps.python.org/api/peps/${p}/`);if(r.ok){const d=await r.json();peps.push({num:p,title:d.title,status:d.status,type:d.type,pyver:d.python_version,url:`https://peps.python.org/pep-${String(p).padStart(4,'0')}/`});}}catch{}
+    }
+    ctx.peps=peps;
+    setStep('peps','done',peps.length?`${peps.length} PEPs`:'none');
+
+    setStep('disc','run');
+    const discuss=[];
+    for(const slug of allRefs.discs.slice(0,4)){
+      try{const r=await fetch(`https://discuss.python.org/t/${slug}.json`);if(r.ok){const d=await r.json();discuss.push({title:d.title,posts:d.posts_count,views:d.views,url:`https://discuss.python.org/t/${slug}`,excerpt:(d.post_stream?.posts?.[0]?.cooked||'').replace(/<[^>]+>/g,'').slice(0,300)});}}catch{}
+    }
+    ctx.discuss=discuss;
+    setStep('disc','done',discuss.length?`${discuss.length} threads`:'none');
+
+    setStep('br','run');
+    const brImpact=await checkBranches(num);ctx.brImpact=brImpact;
+    setStep('br','done',`${Object.keys(brImpact).length} branches`);
+
+    setStep('sta','run');
+    const an=analyze(files);ctx.an=an;
+    ctx.experts=EXPERTS.resolve(files);
+    ctx.labelAnalysis=analyzeLabels(pr.labels||[]);
+    const {crits,highs}=an.sum;
+    setStep('sta','done',crits?`${crits} critical!`:highs?`${highs} high`:'clean');
+
+    setStep('ai','run');
+    const rpt=await callClaude(ctx,num,an,selBr);
+    setStep('ai','done','complete');
+
+    setTimeout(()=>{$('pipea').innerHTML='';},600);
+    renderResult(rpt,ctx,an,num);
+  }catch(e){
+    showErr(e.message||'Something went wrong.');
+    const act=STEPS.find(s=>SS[s.id]?.st==='run');
+    if(act)setStep(act.id,'fail');
+  }
+  btn.disabled=false;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CLAUDE CALL
+// ═══════════════════════════════════════════════════════════════════════════
+async function callClaude(ctx,prNum,an,branch){
+  const pr=ctx.pr,files=ctx.files||[],hist=ctx.hist||{};
+  const timeline=ctx.timeline||[],issues=ctx.issues||[];
+  const peps=ctx.peps||[],discuss=ctx.discuss||[];
+  const experts=ctx.experts||[],brImpact=ctx.brImpact||{};
+  const labelAnalysis=ctx.labelAnalysis||[];
+
+  const fsumm=files.map(f=>`${f.filename} [${classify(f.filename).sub}] +${f.additions}-${f.deletions}`).join('\n');
+  const patches=files.slice(0,10).map(f=>`### ${f.filename}\n\`\`\`diff\n${(f.patch||'').slice(0,900)}\n\`\`\``).join('\n\n');
+  const histCtx=Object.entries(hist).map(([file,cs])=>`${file}:\n${cs.map(c=>`  ${c.sha} ${c.date} [${c.author}] ${c.msg}`).join('\n')}`).join('\n\n');
+
+  const humanTL=timeline.filter(x=>!x.isBot).slice(0,40);
+  const tlNarrative=humanTL.map(x=>{
+    if(x.kind==='comment')return `[${x.date?.slice(0,10)}] @${x.login} comment: ${(x.body||'').slice(0,250)}`;
+    if(x.kind==='review')return `[${x.date?.slice(0,10)}] @${x.login} REVIEW[${x.state}]: ${(x.body||'').slice(0,250)}`;
+    if(x.kind==='inline')return `[${x.date?.slice(0,10)}] @${x.login} inline on ${x.path}: ${(x.body||'').slice(0,200)}`;
+    if(x.kind==='labeled')return `[${x.date?.slice(0,10)}] @${x.login} added label: ${x.ev?.label?.name}`;
+    if(x.kind==='unlabeled')return `[${x.date?.slice(0,10)}] @${x.login} removed label: ${x.ev?.label?.name}`;
+    if(x.kind==='merged')return `[${x.date?.slice(0,10)}] MERGED by @${x.login}`;
+    if(x.kind==='closed')return `[${x.date?.slice(0,10)}] CLOSED by @${x.login}`;
+    if(x.kind==='cross-referenced')return `[${x.date?.slice(0,10)}] Cross-ref from #${x.ev?.source?.issue?.number}`;
+    return `[${x.date?.slice(0,10)}] ${x.kind} by @${x.login}`;
+  }).join('\n');
+
+  const issueCtxStr=issues.map(i=>`Issue #${i.num} [${i.state}]: ${i.title}\nCreated: ${i.created} | Labels: ${i.labels.map(l=>l.name).join(', ')}\n${i.body}\nLabel history: ${i.labelHistory.map(l=>`"${l.label}" by @${l.actor} on ${l.date}`).join(' -> ')}\nComments:\n${i.humanComments.map(c=>`  @${c.login} (${c.date}): ${c.body}`).join('\n')}`).join('\n\n');
+
+  const labelStr=labelAnalysis.map(l=>`"${l.name}": ${l.meaning} | Signal: ${l.signal}`).join('\n');
+  const expStr=experts.slice(0,8).map(e=>`@${e.user} (${e.info?.area||'expert'})`).join(', ');
+
+  const staticCtx=`STATIC ANALYSIS (CPython 3.16-main: 93 bytecodes, 1247 stable ABI items, 393 tests):
+API breaks: ${JSON.stringify(an.api)}
+Sig changes: ${JSON.stringify(an.sig.slice(0,8))}
+C issues: ${JSON.stringify(an.c)}
+Refcount: ${JSON.stringify(an.rc)}
+Python AST: ${JSON.stringify(an.py)}
+Security: ${JSON.stringify(an.sec)}
+Platform: ${JSON.stringify(an.plat)}
+Free-thread risks: ${JSON.stringify(an.ft)}
+Stable ABI: ${JSON.stringify(an.abi)}
+Test gaps: ${JSON.stringify(an.tgaps.slice(0,12))}
+Test files needed: ${JSON.stringify(an.tneeded)}
+NEWS missing: ${JSON.stringify(an.newsmiss)}
+Grammar changes: ${an.grammar.join(', ')||'none'}
+CODEOWNERS experts: ${expStr}`;
+
+  const sys=`You are a CPython core developer reviewing a PR. You have been given the FULL CONVERSATION HISTORY in chronological order, the complete linked issue timeline, discuss.python.org threads, and static analysis from the actual CPython 3.16-main repo.
+
+Your review synthesises ALL OF IT:
+- Who said what in the timeline? What concerns were raised and resolved? What is the current consensus?
+- Does the linked issue justify this PR? Does the fix address the root cause?
+- What do the labels signal about current review state?
+- Which CODEOWNERS experts are needed and why?
+- What is the community sentiment from discuss.python.org?
+
+CPython review standards:
+1. MINIMAL: Does exactly one thing. No scope creep.
+2. LEGITIMATE: Fixes a real bug with an issue, or implements an accepted PEP.
+3. NON-INTERFERING: Does not touch unrelated code.
+4. NEWS entry required in Misc/NEWS.d/next/<CATEGORY>/gh-NNNNN.rst
+5. Regression test required
+6. Backward compat: 2-version DeprecationWarning before any removal
+7. C code: PyMem_* not malloc, PyOS_snprintf not sprintf, Argument Clinic
+8. Free-threading: Lib/test/test_free_threading/ for GIL-sensitive changes
+9. Grammar changes: make regen-pegen && make regen-all
+10. Branch policy: 3.10=security-only, 3.11-3.13=bug-fixes-only, 3.14=prerelease, main=all
+
+Respond ONLY with valid JSON (no fences):
+{"verdict":"APPROVE"|"REQUEST_CHANGES"|"NEEDS_INFO"|"REJECT","verdict_reason":"one sentence","confidence":1-5,"priority":"low"|"medium"|"high"|"critical","regression_risk":"low"|"medium"|"high","is_minimal":"yes"|"no"|"mostly","is_legitimate":"yes"|"no"|"unclear","is_non_interfering":"yes"|"no"|"unknown","consensus":"clear"|"emerging"|"divided"|"none","timeline_assessment":"paragraph on conversation history - who said what, stalled discussions, resolved concerns","label_assessment":"what current labels signal about review state","issue_assessment":"does the linked issue justify this? does the fix address root cause?","discuss_assessment":"community sentiment from discuss.py or N/A","expert_routing":"specific people from CODEOWNERS and why each is needed","cherry_pick":"backport recommendation with reasoning","summary":"3-4 sentences: what/why/how/quality","news_category":"exact Misc/NEWS.d/next/<CAT>","pep_alignment":"PEP analysis or N/A","free_thread_analysis":"free-threading safety","compat_analysis":"backward compat analysis","test_verdict":"specific tests needed","checklist":[{"status":"pass"|"fail"|"warn"|"na","item":"check","note":"specific evidence from comments or diff"}],"feedback":"## Overview\n## Timeline & Discussion\n## Critical Issues\n## Code Quality\n## Test Coverage\n## Compatibility\n## Changelog & Docs\n## Recommendations\n\nQuote actual reviewer comments. Be specific. Reference filenames.","components":["subsystems"],"labels":["github-label-suggestions"],"source_refs":[{"type":"pep"|"discuss"|"issue","label":"short","url":"url or null","relevance":"one sentence"}]}`;
+
+  const user=`PR #${prNum}: ${pr.title}
+Author: @${pr.user?.login} | Base: ${pr.base?.ref} | State: ${pr.state}${pr.draft?' (DRAFT)':''}
+Labels: ${(pr.labels||[]).map(l=>l.name).join(', ')||'none'}
+
+=== LABEL SIGNALS ===
+${labelStr||'(none)'}
+
+=== PR DESCRIPTION ===
+${(pr.body||'(none)').slice(0,2000)}
+
+=== FULL TIMELINE (chronological, bots filtered) ===
+${tlNarrative||'(no human events)'}
+
+=== FILES CHANGED ===
+${fsumm}
+
+=== PATCHES ===
+${patches}
+
+=== GIT HISTORY ===
+${histCtx||'(none)'}
+
+=== LINKED ISSUE HISTORY ===
+${issueCtxStr||'(none)'}
+
+=== PEPs ===
+${peps.map(p=>`PEP ${p.num} [${p.status}]: ${p.title}\n${p.url}`).join('\n')||'(none)'}
+
+=== discuss.python.org ===
+${discuss.map(d=>`"${d.title}" ${d.posts} posts ${d.views} views\n${d.url}\n${d.excerpt}`).join('\n\n')||'(none)'}
+
+=== BRANCHES ===
+${JSON.stringify(brImpact)}
+
+${staticCtx}`;
+
+  const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:4000,system:sys,messages:[{role:'user',content:user}]})});
+  if(!res.ok)throw new Error('Claude API error '+res.status);
+  const d=await res.json();
+  const raw=(d.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('');
+  try{return JSON.parse(raw.replace(/```json|```/g,'').trim());}
+  catch{throw new Error('Could not parse AI response. Try again.');}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RENDER TIMELINE ITEM
+// ═══════════════════════════════════════════════════════════════════════════
+function renderTLItem(x){
+  const RSI={APPROVED:'&#9989;',CHANGES_REQUESTED:'&#128260;',COMMENTED:'&#128172;',DISMISSED:'&#128683;'};
+  if(x.kind==='comment')return `<div class="tl-item" style="display:flex;gap:12px;padding:8px 0"><div style="width:32px;height:32px;border-radius:50%;background:var(--abg);border:2px solid var(--ac);display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:14px">&#128172;</div><div style="flex:1;padding-top:4px"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><strong style="font-size:12px">@${esc(x.login)}</strong><span style="font-size:12px;color:var(--tx2)">commented</span><span style="font-size:11px;color:var(--tx3);margin-left:auto">${(x.date||'').slice(0,10)}</span></div>${x.body?`<div style="font-size:13px;margin-top:5px;background:var(--s1);padding:8px 12px;border-radius:var(--r);border:1px solid var(--bd);white-space:pre-wrap;word-break:break-word">${esc((x.body||'').slice(0,400))}</div>`:''}</div></div>`;
+  if(x.kind==='review'){const cls=x.state==='APPROVED'?'var(--gn)':x.state==='CHANGES_REQUESTED'?'var(--yw)':'var(--ac)';return `<div class="tl-item" style="display:flex;gap:12px;padding:8px 0"><div style="width:32px;height:32px;border-radius:50%;background:var(--s1);border:2px solid ${cls};display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:14px">${RSI[x.state]||'&#128065;'}</div><div style="flex:1;padding-top:4px"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><strong style="font-size:12px">@${esc(x.login)}</strong><span style="font-size:11px;font-weight:700;color:${cls}">[${esc(x.state||'')}]</span><span style="font-size:11px;color:var(--tx3);margin-left:auto">${(x.date||'').slice(0,10)}</span></div>${x.body?`<div style="font-size:13px;margin-top:5px;background:var(--s1);padding:8px 12px;border-radius:var(--r);border:1px solid var(--bd);white-space:pre-wrap;word-break:break-word">${esc((x.body||'').slice(0,400))}</div>`:''}</div></div>`;}
+  if(x.kind==='inline')return `<div class="tl-item" style="display:flex;gap:12px;padding:8px 0"><div style="width:32px;height:32px;border-radius:50%;background:var(--s1);border:2px solid var(--bd2);display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:14px">&#128196;</div><div style="flex:1;padding-top:4px"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><strong style="font-size:12px">@${esc(x.login)}</strong><span style="font-size:12px;color:var(--tx2)">on <code>${esc(x.path||'')}</code></span><span style="font-size:11px;color:var(--tx3);margin-left:auto">${(x.date||'').slice(0,10)}</span></div>${x.body?`<div style="font-size:13px;margin-top:5px;background:var(--s1);padding:8px 12px;border-radius:var(--r);border:1px solid var(--bd);white-space:pre-wrap;word-break:break-word">${esc((x.body||'').slice(0,300))}</div>`:''}</div></div>`;
+  if(x.kind==='labeled'){const ln=x.ev?.label?.name||'?';const info=LABELS[ln]||{};return `<div style="display:flex;gap:12px;padding:6px 0;align-items:center"><div style="width:32px;height:32px;border-radius:50%;background:var(--pibg);border:2px solid var(--pi);display:flex;align-items:center;justify-content:center;font-size:14px">&#127991;</div><div style="flex:1"><span style="font-size:12px"><strong>@${esc(x.login)}</strong> added label <code>${esc(ln)}</code></span>${info.signal?`<div style="font-size:11px;color:var(--tx2);margin-top:2px">&#8594; ${esc(info.signal)}</div>`:''}</div><span style="font-size:11px;color:var(--tx3)">${(x.date||'').slice(0,10)}</span></div>`;}
+  if(x.kind==='unlabeled')return `<div style="display:flex;gap:12px;padding:6px 0;align-items:center"><div style="width:32px;height:32px;border-radius:50%;background:var(--s2);border:2px solid var(--bd);display:flex;align-items:center;justify-content:center;font-size:14px">&#127991;</div><div style="flex:1;font-size:12px"><strong>@${esc(x.login)}</strong> removed label <code>${esc(x.ev?.label?.name||'?')}</code></div><span style="font-size:11px;color:var(--tx3)">${(x.date||'').slice(0,10)}</span></div>`;
+  if(x.kind==='merged')return `<div style="display:flex;gap:12px;padding:6px 0;align-items:center"><div style="width:32px;height:32px;border-radius:50%;background:var(--pubg);border:2px solid var(--pu);display:flex;align-items:center;justify-content:center;font-size:14px">&#128995;</div><div style="flex:1;font-size:13px;font-weight:700;color:var(--put)">Merged by @${esc(x.login)}</div><span style="font-size:11px;color:var(--tx3)">${(x.date||'').slice(0,10)}</span></div>`;
+  if(x.kind==='closed')return `<div style="display:flex;gap:12px;padding:6px 0;align-items:center"><div style="width:32px;height:32px;border-radius:50%;background:var(--rbg);border:2px solid var(--rd);display:flex;align-items:center;justify-content:center;font-size:14px">&#128308;</div><div style="flex:1;font-size:13px;font-weight:700;color:var(--rt)">Closed by @${esc(x.login)}</div><span style="font-size:11px;color:var(--tx3)">${(x.date||'').slice(0,10)}</span></div>`;
+  if(x.kind==='cross-referenced'){const ref=x.ev?.source?.issue;return `<div style="display:flex;gap:12px;padding:6px 0;align-items:center"><div style="width:32px;height:32px;border-radius:50%;background:var(--tbg);border:2px solid var(--te);display:flex;align-items:center;justify-content:center;font-size:14px">&#128279;</div><div style="flex:1;font-size:12px">Cross-referenced from <a href="${esc(ref?.html_url||'#')}" target="_blank">#${ref?.number||'?'}: ${esc((ref?.title||'').slice(0,50))}</a></div><span style="font-size:11px;color:var(--tx3)">${(x.date||'').slice(0,10)}</span></div>`;}
+  if(x.kind==='review_requested')return `<div style="display:flex;gap:12px;padding:6px 0;align-items:center"><div style="width:32px;height:32px;border-radius:50%;background:var(--s1);border:2px solid var(--bd2);display:flex;align-items:center;justify-content:center;font-size:14px">&#128065;</div><div style="flex:1;font-size:12px;color:var(--tx2)">Review requested</div><span style="font-size:11px;color:var(--tx3)">${(x.date||'').slice(0,10)}</span></div>`;
+  return '';
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RENDER RESULT
+// ═══════════════════════════════════════════════════════════════════════════
+function renderResult(D,ctx,an,num){
+  const pr=ctx.pr,files=ctx.files||[],hist=ctx.hist||{};
+  const timeline=ctx.timeline||[],issues=ctx.issues||[];
+  const experts=ctx.experts||[],labelAnalysis=ctx.labelAnalysis||[];
+  const VM={APPROVE:{cls:'va',ico:'&#9989;',lbl:'Approve'},REQUEST_CHANGES:{cls:'vr',ico:'&#128260;',lbl:'Request changes'},NEEDS_INFO:{cls:'vn',ico:'&#8505;&#65039;',lbl:'Needs more info'},REJECT:{cls:'vx',ico:'&#10060;',lbl:'Reject'}};
+  const v=VM[D.verdict]||VM.NEEDS_INFO;
+  const pCls=`pl-${(D.priority||'medium').toLowerCase()}`;
+  const rCls={low:'rl',medium:'rm',high:'rh'}[D.regression_risk]||'rm';
+  const conf=Math.min(5,Math.max(1,D.confidence||3));
+  const CK={pass:'&#10003;',fail:'&#10007;',warn:'&#9888;',na:'&#8211;'};
+  const stCls=pr.draft?'st-draft':pr.merged?'st-merged':pr.state==='open'?'st-open':'st-closed';
+  const stLbl=pr.draft?'Draft':pr.merged?'Merged':pr.state==='open'?'Open':'Closed';
+  const adds=files.reduce((s,f)=>s+f.additions,0),dels=files.reduce((s,f)=>s+f.deletions,0);
+  const an2=an.sum;
+  const humanTL=timeline.filter(x=>!x.isBot);
+
+  let abar='';
+  if(an2.crits>0)abar+=`<div class="ai a-crit">&#9940; ${an2.crits} critical</div>`;
+  if(an2.highs>0)abar+=`<div class="ai a-high">&#9888; ${an2.highs} high</div>`;
+  if(an2.api>0)abar+=`<div class="ai a-crit">&#128165; ${an2.api} API break${an2.api>1?'s':''}</div>`;
+  if(an2.rc>0)abar+=`<div class="ai a-crit">&#128308; ${an2.rc} refcount</div>`;
+  if(an2.sec>0)abar+=`<div class="ai a-crit">&#128272; ${an2.sec} security</div>`;
+  if(an2.ft>0)abar+=`<div class="ai a-high">&#129525; ${an2.ft} free-thread</div>`;
+  if(an2.abi>0)abar+=`<div class="ai a-high">&#128220; ${an2.abi} stable ABI</div>`;
+  if(an2.news>0)abar+=`<div class="ai a-warn">&#128240; NEWS missing</div>`;
+  if(an2.gram>0)abar+=`<div class="ai a-high">&#128208; grammar</div>`;
+  if(an2.tgaps>0)abar+=`<div class="ai a-warn">&#129514; ${an2.tgaps} untested</div>`;
+  if(!abar)abar='<div class="ai a-ok">&#10003; Static analysis clean</div>';
+
+  const legality=['is_minimal','is_legitimate','is_non_interfering'].map(k=>{
+    const val=D[k]||'?';
+    const cls=val==='yes'?'a-ok':val==='no'?'a-crit':'a-warn';
+    const lbl={is_minimal:'Minimal?',is_legitimate:'Legitimate?',is_non_interfering:'Non-interfering?'}[k];
+    return `<div class="ai ${cls}" style="font-size:11px">${lbl} <strong>${val}</strong></div>`;
+  }).join('');
+  const consCls={'clear':'a-ok','emerging':'a-warn','divided':'a-high','none':'a-info'}[D.consensus||'none']||'a-info';
+  const consI=`<div class="ai ${consCls}" style="font-size:11px">Consensus: <strong>${D.consensus||'?'}</strong></div>`;
+
+  // C issues
+  const cI=an.c.map(x=>`<div class="fi ${x.sev}"><span class="fsev sv-${x.sev}">${x.sev}</span><div class="fbody"><div class="ffile">${esc(x.file)}</div><div class="fmsg">${esc(x.issue)}</div></div></div>`).join('');
+  const pyI=an.py.map(x=>`<div class="fi ${x.sev==='HIGH'?'HIGH':x.sev==='MED'?'MED':'LOW'}"><span class="fsev sv-${x.sev==='HIGH'?'HIGH':x.sev==='MED'?'MED':'LOW'}">${x.sev}</span><div class="fbody"><div class="ffile">${esc(x.file)}</div><div class="fmsg">${esc(x.issue)}</div></div></div>`).join('');
+  const rcI=an.rc.map(x=>`<div class="fi CRIT"><span class="fsev sv-REF">REFCOUNT</span><div class="fbody"><div class="ffile">${esc(x.file)}</div><div class="fmsg">${esc(x.note)}</div></div></div>`).join('');
+  const secI=an.sec.map(x=>`<div class="fi SEC"><span class="fsev sv-SEC">SECURITY</span><div class="fbody"><div class="ffile">${esc(x.file)}</div><div class="fmsg">${esc(x.issue)}</div></div></div>`).join('');
+  const ftI=an.ft.map(x=>`<div class="fi FT"><span class="fsev sv-FT">FREE-THREAD</span><div class="fbody"><div class="ffile">${esc(x.file)}</div><div class="fmsg">Free-threading risk in <code>${esc(x.sub)}</code></div></div></div>`).join('');
+  const abiI=an.abi.map(x=>`<div class="fi ABI"><span class="fsev sv-ABI">STABLE ABI</span><div class="fbody"><div class="ffile">${esc(x.file)}</div><div class="fmsg">${esc(x.note)}</div></div></div>`).join('');
+  const newsI=an.newsmiss.map(x=>`<div class="fi MED"><span class="fsev sv-NEWS">NO NEWS</span><div class="fbody"><div class="ffile">${esc(x.file)}</div><div class="fmsg">Misc/NEWS.d/next/${esc(x.cat)}/gh-${num}.rst missing</div></div></div>`).join('');
+
+  const sigRows=an.sig.map(s=>`<tr class="${s.brk?'brk':''}"><td style="font-size:11px">${esc(s.file)}</td><td>${esc(s.func)}()</td><td><div class="sold">${esc(s.old)}</div><div class="snew">${esc(s.new)}</div></td><td>${s.brk?`<span class="brk-b">BREAKS</span>`:`<span class="ok-b">compat</span>`}</td><td style="font-size:11px;color:var(--tx2)">${esc(s.bt)}</td></tr>`).join('');
+
+  const checks=(D.checklist||[]).map(c=>`<div class="ci ${c.status}"><div class="ciico">${CK[c.status]||'?'}</div><div class="cibody"><div class="ciitem">${esc(c.item)}</div>${c.note?`<div class="cinote">${esc(c.note)}</div>`:''}</div></div>`).join('');
+
+  const tlHtml=humanTL.slice(0,60).map(renderTLItem).join('');
+
+  const issuesHtml=issues.map(i=>`<div class="signal-card"><div class="signal-header"><span class="signal-icon">#</span><a href="${esc(i.url)}" target="_blank" class="signal-title">#${i.num}: ${esc(i.title)}</a><span class="issue-state ${i.state==='open'?'is-open':'is-closed'}">${i.state}</span></div><div style="font-size:12px;color:var(--tx3);margin-bottom:6px">${i.created} &middot; ${i.comments_count} comments &middot; labels: ${i.labels.map(l=>l.name).join(', ')||'none'}</div>${i.body?`<div style="font-size:13px;line-height:1.65;margin-bottom:8px">${esc(i.body.slice(0,400))}</div>`:''} ${i.labelHistory.length?`<div style="font-size:11px;color:var(--tx3);margin-bottom:6px">Label history: ${i.labelHistory.map(l=>`"${l.label}" by @${l.actor} on ${l.date}`).join(' &rarr; ')}</div>`:''} ${i.humanComments.length?`<div style="display:flex;flex-direction:column;gap:5px">${i.humanComments.slice(0,4).map(c=>`<div style="font-size:12px;background:var(--s2);padding:6px 10px;border-radius:var(--r);border:1px solid var(--bd)"><strong>@${esc(c.login)}</strong> <span style="color:var(--tx3)">${c.date}</span>: ${esc(c.body.slice(0,250))}</div>`).join('')}</div>`:''}</div>`).join('');
+
+  const discHtml=ctx.discuss.map(d=>`<div class="dcard"><div class="dcard-title"><a href="${esc(d.url)}" target="_blank">${esc(d.title)}</a></div><div class="dcard-meta"><span>${d.posts} posts</span><span>${d.views} views</span></div>${d.excerpt?`<div class="dcard-excerpt">${esc(d.excerpt.slice(0,300))}</div>`:''}</div>`).join('');
+
+  const laHtml=labelAnalysis.map(l=>`<div class="la-item"><span class="la-label" style="background:#${l.color||'888'}">${esc(l.name)}</span><div><div class="la-meaning">${esc(l.meaning)}</div><div class="la-signal">&rarr; ${esc(l.signal)}</div></div></div>`).join('');
+
+  const expHtml=experts.map(e=>`<div class="expert-card"><div class="expert-avatar"><img src="https://github.com/${esc(e.user)}.png?size=56" alt="@${esc(e.user)}" loading="lazy" onerror="this.parentElement.style.display='none'"></div><div><div class="expert-name"><a href="https://github.com/${esc(e.user)}" target="_blank">@${esc(e.user)}</a></div><div class="expert-area">${esc(e.info?.area||'')}</div><div style="font-size:10px;color:var(--tx3)">via ${esc(e.file)}</div></div></div>`).join('');
+
+  const brCards=Object.entries(ctx.brImpact||{}).map(([br,info])=>`<div class="brcard ${info.cls}"><div class="brname">${br}</div><div class="brnote">${info.cls==='ok'?'&#10003;':info.cls==='need'?'!':info.cls==='sec'?'&#128274;':'?'} ${esc(info.note||'')}${info.url?` <a href="${esc(info.url)}" target="_blank">&rarr;</a>`:''}</div></div>`).join('');
+
+  const histHtml=Object.entries(hist).slice(0,4).map(([file,cs])=>`<div class="gitfile"><div class="gitfn"><code>${esc(file)}</code><span style="color:var(--tx3);font-size:11px">[${esc(classify(file).sub)}]</span></div>${cs.slice(0,7).map(c=>`<div class="gitc"><span class="gsha">${esc(c.sha)}</span><span class="gmsg">${esc(c.msg)}</span><span class="gauthor">${esc(c.author)}</span><span class="gdate">${esc(c.date)}</span></div>`).join('')}</div>`).join('');
+
+  // Need/Do boxes
+  const needItems=[
+    an.newsmiss.length?`<div class="nd-item"><span class="nd-ico">&#128240;</span>Add Misc/NEWS.d/next/${esc(an.newsmiss[0]?.cat||'Library')}/gh-${num}.rst</div>`:'',
+    an.api.length?`<div class="nd-item"><span class="nd-ico">&#128165;</span>API break: ${esc(an.api[0]?.func||'')}() needs deprecation cycle</div>`:'',
+    an.rc.length?`<div class="nd-item"><span class="nd-ico">&#128308;</span>Refcount imbalance in ${esc(an.rc[0]?.file||'')}</div>`:'',
+    an.c.filter(x=>x.sev==='CRIT').length?`<div class="nd-item"><span class="nd-ico">&#9881;</span>${esc(an.c.find(x=>x.sev==='CRIT')?.issue||'')}</div>`:'',
+    an.grammar.length?`<div class="nd-item"><span class="nd-ico">&#128208;</span>make regen-pegen &amp;&amp; make regen-all</div>`:'',
+    ...an.tneeded.slice(0,2).map(t=>`<div class="nd-item"><span class="nd-ico">&#129514;</span>Update ${esc(t.expected)}</div>`),
+  ].filter(Boolean);
+  const needBox=`<div class="nd-box"><div class="nd-title" style="color:var(--rt)">&#10060; Must resolve</div>${needItems.join('')||'<div style="font-size:13px;color:var(--gt);padding:8px 0">&#10003; No blockers detected</div>'}</div>`;
+
+  const doItems=[
+    ...experts.slice(0,3).map(e=>`<div class="nd-item"><span class="nd-ico">&#128100;</span>Request @${esc(e.user)} (${esc(e.info?.area?.split(',')[0]||'')})</div>`),
+    ...Object.entries(ctx.brImpact||{}).filter(([_,i])=>i.cls==='need').map(([br])=>`<div class="nd-item"><span class="nd-ico">&#127807;</span>Add <code>needs-backport-to-${esc(br)}</code> label</div>`),
+    `<div class="nd-item"><span class="nd-ico">&#128240;</span>NEWS category: <code>${esc(D.news_category||'Library')}</code></div>`,
+    ctx.discuss.length?`<div class="nd-item"><span class="nd-ico">&#128172;</span>Check discuss.python.org: ${esc(ctx.discuss[0]?.title||'')}</div>`:'',
+  ].filter(Boolean);
+  const doBox=`<div class="nd-box"><div class="nd-title" style="color:var(--gt)">&#10003; Next steps</div>${doItems.join('')}</div>`;
+
+  const nStatic=an.c.length+an.py.length+an.sec.length+an.rc.length+an.ft.length+an.abi.length;
+
+  $('maina').innerHTML=`
+  <div class="prmeta">
+    <div class="pr-top">
+      <div>
+        <div class="pr-title">${esc(pr.title)}</div>
+        <div class="pr-sub"><a href="${esc(pr.html_url)}" target="_blank">#${esc(num)}</a><span>@${esc(pr.user?.login)}</span><span>&rarr; ${esc(pr.base?.ref)}</span><span>${new Date(pr.created_at).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}</span>${(pr.labels||[]).map(l=>`<code>${esc(l.name)}</code>`).join('')}</div>
+      </div>
+      <span class="stbadge ${stCls}">${stLbl}</span>
+    </div>
+    <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;align-items:center">
+      <span style="font-size:12px;color:var(--tx3)">+${adds}&minus;${dels} &middot; ${files.length} files &middot; ${pr.commits||0} commits &middot; ${humanTL.length} timeline events</span>
+      <span class="rbadge ${rCls}" style="font-size:12px">regression: ${esc(D.regression_risk||'?')}</span>
+    </div>
+  </div>
+
+  <div class="abar">${abar}</div>
+  <div class="abar" style="margin-top:-8px">${legality}${consI}</div>
+  <div class="need-do">${needBox}${doBox}</div>
+
+  <div class="card">
+    <div class="csec"><div class="CLBL">Verdict</div><div class="vrow ${v.cls}"><div class="vico">${v.ico}</div><div><div class="vname">${v.lbl}</div><div class="vwhy">${esc(D.verdict_reason||'')}</div></div></div></div>
+    <div class="csec"><div class="mstrip">
+      <div class="mi"><div class="milbl">Priority</div><div class="prow ${pCls}"><div class="plbl">${(D.priority||'medium').charAt(0).toUpperCase()+(D.priority||'medium').slice(1)}</div><div class="pb"><div class="pbf"></div></div></div></div>
+      <div class="mi"><div class="milbl">Confidence</div><div class="cdots">${Array.from({length:5},(_,i)=>`<div class="cdot ${i<conf?'on':''}"></div>`).join('')}</div></div>
+      <div class="mi"><div class="milbl">NEWS</div><div style="font-size:12px"><code>${esc(D.news_category||'?')}</code></div></div>
+    </div></div>
+    <div class="csec"><div class="CLBL">Summary</div><div class="prose">${esc(D.summary||'')}</div></div>
+    ${(D.components||[]).length?`<div class="csec"><div class="CLBL">Components</div><div class="tags">${D.components.map(c=>`<span class="tag t-comp">${esc(c)}</span>`).join('')}</div></div>`:''}
+  </div>
+
+  <div class="tabbar">
+    <div class="tab on" data-t="review" onclick="switchTab('review')">Review</div>
+    <div class="tab" data-t="timeline" onclick="switchTab('timeline')">Timeline <span class="tbadge tb-b">${humanTL.length}</span></div>
+    <div class="tab" data-t="signals" onclick="switchTab('signals')">Issue &amp; Signals${issues.length?` <span class="tbadge tb-p">${issues.length}</span>`:''}</div>
+    <div class="tab" data-t="labels" onclick="switchTab('labels')">Labels${labelAnalysis.length?` <span class="tbadge tb-y">${labelAnalysis.length}</span>`:''}</div>
+    <div class="tab" data-t="experts" onclick="switchTab('experts')">Experts${experts.length?` <span class="tbadge tb-g">${experts.length}</span>`:''}</div>
+    <div class="tab" data-t="static" onclick="switchTab('static')">Static${nStatic?` <span class="tbadge tb-r">${nStatic}</span>`:''}</div>
+    <div class="tab" data-t="compat" onclick="switchTab('compat')">Compat${an.sig.length?` <span class="tbadge tb-y">${an.sig.length}</span>`:''}</div>
+    <div class="tab" data-t="branches" onclick="switchTab('branches')">Branches</div>
+    <div class="tab" data-t="history" onclick="switchTab('history')">Git History</div>
+  </div>
+
+  <div id="tab-review" class="panel on"><div class="card">
+    <div class="csec"><div class="CLBL">Checklist</div><div class="chklist">${checks||'<div class="empty">No checklist</div>'}</div></div>
+    ${D.timeline_assessment?`<div class="csec"><div class="CLBL">&#128197; Timeline &amp; discussion analysis</div><div class="prose">${esc(D.timeline_assessment)}</div></div>`:''}
+    ${D.label_assessment?`<div class="csec"><div class="CLBL">&#127991; Label signal assessment</div><div class="prose">${esc(D.label_assessment)}</div></div>`:''}
+    ${D.issue_assessment?`<div class="csec"><div class="CLBL">&#128027; Issue assessment</div><div class="prose">${esc(D.issue_assessment)}</div></div>`:''}
+    ${D.discuss_assessment&&D.discuss_assessment!=='N/A'?`<div class="csec"><div class="CLBL">&#128172; Community signals</div><div class="prose">${esc(D.discuss_assessment)}</div></div>`:''}
+    ${D.free_thread_analysis?`<div class="csec"><div class="CLBL">&#129525; Free-threading</div><div class="prose">${esc(D.free_thread_analysis)}</div></div>`:''}
+    ${D.pep_alignment&&D.pep_alignment!=='N/A'?`<div class="csec"><div class="CLBL">&#128203; PEP alignment</div><div class="prose">${esc(D.pep_alignment)}</div></div>`:''}
+    <div class="csec"><div class="CLBL">Full technical review</div><div class="prose">${esc(D.feedback||'')}</div></div>
+    ${D.expert_routing?`<div class="csec"><div class="CLBL">&#128101; Expert routing (CODEOWNERS)</div><div class="prose">${esc(D.expert_routing)}</div></div>`:''}
+    ${(D.labels||[]).length?`<div class="csec"><div class="CLBL">Suggested labels</div><div class="tags">${D.labels.map(l=>`<span class="tag t-lbl">${esc(l)}</span>`).join('')}</div></div>`:''}
+  </div></div>
+
+  <div id="tab-timeline" class="panel"><div class="card"><div class="csec">
+    <div class="CLBL">Full PR timeline &mdash; ${humanTL.length} human events (bots filtered)</div>
+    <div style="display:flex;flex-direction:column;gap:0;padding-left:4px">${tlHtml||'<div class="empty">No human events</div>'}</div>
+  </div></div></div>
+
+  <div id="tab-signals" class="panel">
+    ${issuesHtml?`<div class="card"><div class="csec"><div class="CLBL">Linked issue history</div>${issuesHtml}</div></div>`:'<div class="empty" style="margin-bottom:1rem">No linked issues found</div>'}
+    ${discHtml?`<div class="card"><div class="csec"><div class="CLBL">discuss.python.org threads</div>${discHtml}</div></div>`:'<div class="empty" style="margin-bottom:1rem">No discuss.python.org threads found</div>'}
+    ${(ctx.peps||[]).length?`<div class="card"><div class="csec"><div class="CLBL">PEPs</div>${ctx.peps.map(p=>`<div class="dcard"><div class="dcard-title"><a href="${esc(p.url)}" target="_blank">PEP ${p.num}: ${esc(p.title)}</a></div><div class="dcard-meta"><span>${esc(p.status)}</span><span>Python ${esc(p.pyver||'?')}</span></div></div>`).join('')}</div></div>`:''}
+  </div>
+
+  <div id="tab-labels" class="panel"><div class="card">
+    <div class="csec"><div class="CLBL">Label signal analysis</div>${laHtml||'<div class="empty">No labels on this PR</div>'}</div>
+    <div class="csec"><div class="CLBL">Key CPython labels</div><div class="prose" style="font-size:12px">awaiting merge = all approved, CI green, ready to merge
+awaiting changes = blocked on author
+DO-NOT-MERGE = blocked, read reason
+skip news = NEWS entry waived
+needs-backport-to-X.Y = miss-islington bot auto-creates cherry-pick
+type-crash = fast-track backport all stable branches
+type-security = coordinate with security team first</div></div>
+  </div></div>
+
+  <div id="tab-experts" class="panel"><div class="card">
+    <div class="csec"><div class="CLBL">CODEOWNERS experts (from actual .github/CODEOWNERS)</div><div class="expert-grid">${expHtml||'<div class="empty">No specific experts matched</div>'}</div></div>
+    ${D.expert_routing?`<div class="csec"><div class="CLBL">AI routing recommendation</div><div class="prose">${esc(D.expert_routing)}</div></div>`:''}
+    <div class="csec"><div class="CLBL">How CODEOWNERS works</div><div class="prose" style="font-size:12px">Entries in .github/CODEOWNERS are auto-added as reviewers, not legal "owners". The final matching pattern takes precedence. See devguide.python.org/core-developers/experts/ for the full Experts Index.</div></div>
+  </div></div>
+
+  <div id="tab-static" class="panel"><div class="card">
+    ${secI?`<div class="csec"><div class="CLBL">&#128272; Security</div><div class="flist">${secI}</div></div>`:''}
+    ${rcI?`<div class="csec"><div class="CLBL">&#128308; Refcount</div><div class="flist">${rcI}</div></div>`:''}
+    ${ftI?`<div class="csec"><div class="CLBL">&#129525; Free-threading</div><div class="flist">${ftI}</div></div>`:''}
+    ${abiI?`<div class="csec"><div class="CLBL">&#128220; Stable ABI</div><div class="flist">${abiI}</div></div>`:''}
+    <div class="csec"><div class="CLBL">C-level issues</div><div class="flist">${cI||'<div class="empty">None detected</div>'}</div></div>
+    <div class="csec"><div class="CLBL">Python AST issues</div><div class="flist">${pyI||'<div class="empty">None detected</div>'}</div></div>
+    ${newsI?`<div class="csec"><div class="CLBL">&#128240; NEWS entry</div><div class="flist">${newsI}</div></div>`:''}
+    ${an.edge.length?`<div class="csec"><div class="CLBL">&#127919; Edge cases to test</div><div style="display:flex;flex-wrap:wrap;gap:6px">${an.edge.map(e=>`<span style="font-size:12px;padding:3px 10px;border-radius:999px;border:1.5px solid var(--or);color:var(--ot);background:var(--obg);font-family:var(--mn)">${esc(e.case)}</span>`).join('')}</div></div>`:''}
+  </div></div>
+
+  <div id="tab-compat" class="panel"><div class="card">
+    ${D.compat_analysis?`<div class="csec"><div class="CLBL">Compatibility analysis (AI)</div><div class="prose">${esc(D.compat_analysis)}</div></div>`:''}
+    <div class="csec"><div class="CLBL">Signature changes (${an.sig.length})</div>
+      ${sigRows?`<div style="overflow-x:auto"><table class="sigtbl"><tr><th>File</th><th>Function</th><th>Old &rarr; New</th><th>Status</th><th>Break type</th></tr>${sigRows}</table></div>`:'<div class="empty">None detected</div>'}
+    </div>
+    ${D.test_verdict?`<div class="csec"><div class="CLBL">Test verdict (AI)</div><div class="prose">${esc(D.test_verdict)}</div></div>`:''}
+    ${an.tneeded.length?`<div class="csec"><div class="CLBL">Test files to verify</div>${an.tneeded.map(t=>`<div style="display:flex;gap:8px;padding:5px 9px;border:1px solid var(--yw);background:var(--ybg);border-radius:var(--r);font-size:12px;margin-bottom:4px;font-family:var(--mn)">${esc(t.expected)}</div>`).join('')}</div>`:''}
+  </div></div>
+
+  <div id="tab-branches" class="panel"><div class="card">
+    <div class="csec"><div class="CLBL">Branch impact</div><div class="brgrid">${brCards}</div></div>
+    ${D.cherry_pick?`<div class="csec"><div class="CLBL">Backport recommendation</div><div class="prose">${esc(D.cherry_pick)}</div></div>`:''}
+    <div class="csec"><div class="CLBL">Branch policy</div><div class="prose" style="font-size:12px">main (3.16): all PRs welcome
+3.14 prerelease: features OK, needs separate backport PR
+3.13/3.12/3.11 stable: bug fixes ONLY
+3.10 security-only: CVE/security fixes ONLY
+miss-islington auto-creates backport PRs on "needs-backport-to-X.Y" label</div></div>
+  </div></div>
+
+  <div id="tab-history" class="panel"><div class="card"><div class="csec">
+    <div class="CLBL">Git history &mdash; last 10 commits per touched file</div>
+    ${histHtml||'<div class="empty">No history fetched</div>'}
+  </div></div></div>
+
+  <div class="acts">
+    <a class="act" href="${esc(pr.html_url)}" target="_blank">&#128279; Open on GitHub</a>
+    <button class="act" onclick="window.sendPrompt&&sendPrompt('Draft a GitHub review comment for CPython PR #${num} based on the triage')">&#9999; Draft review &uarr;</button>
+    <button class="act" onclick="window.sendPrompt&&sendPrompt('Write Misc/NEWS.d/next/${esc(D.news_category||'Library')}/gh-${num}.rst for this PR')">&#128240; Generate NEWS entry &uarr;</button>
+    <button class="act" onclick="window.sendPrompt&&sendPrompt('What are the cherry-pick steps to backport CPython PR #${num} to 3.13?')">&#127807; Backport steps &uarr;</button>
+  </div>`;
+}
+
+function switchTab(name){
+  document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('on',t.dataset.t===name));
+  document.querySelectorAll('.panel').forEach(p=>p.classList.toggle('on',p.id===`tab-${name}`));
+}
+
+$('pri').addEventListener('keydown',e=>{if(e.key==='Enter')run();});
+</script>
+</body>
+</html>

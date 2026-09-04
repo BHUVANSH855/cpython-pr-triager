@@ -1,0 +1,13 @@
+.triager-cache/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+env/
+data/patterns.json
+report.json
+*.log
+.DS_Store
+Thumbs.db
