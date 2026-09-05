@@ -22,7 +22,6 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-
 SEVERITY_ORDER = {
     "CRITICAL": 0,
     "HIGH": 1,

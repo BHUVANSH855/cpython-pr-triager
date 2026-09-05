@@ -14,3 +14,4 @@ Thumbs.db
 
 # Local triager regression outputs
 data/current-*.json
+data/*.json

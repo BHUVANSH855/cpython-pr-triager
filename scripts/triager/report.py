@@ -9,7 +9,8 @@ It does not perform GitHub requests and does not own CLI presentation.
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 
 def build_report(

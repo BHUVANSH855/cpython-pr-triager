@@ -15,8 +15,8 @@ rather than:
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from collections.abc import Iterable
 from statistics import median, quantiles
-from typing import Iterable
 
 
 def summarize_sizes(

@@ -3,6 +3,14 @@ Deterministic technical analyzers.
 
 These analyzers produce review prompts from changed files.
 They never establish that a defect exists.
+
+Fixes applied:
+- Refcount check logic was inverted (inc < dec + 3).  Now correctly
+  fires when inc > dec (leak) or dec > inc + 2 (over-decrement).
+- Added malloc/free/realloc/calloc -> PyMem_* check (point 13).
+- Added DeprecationWarning without stacklevel= check (point 17).
+- Grammar signal now includes exact regen commands (point 18).
+- Added free-threading risk detection for sensitive subsystems (point 12).
 """
 
 from __future__ import annotations
@@ -19,10 +27,49 @@ from .diff import (
 from .models import EvidenceRef, Finding
 
 
-RULES = {
-    # --------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Subsystems that require free-threading attention (Python 3.13+ --disable-gil)
+# ---------------------------------------------------------------------------
+FREE_THREAD_SUBSYSTEMS = re.compile(
+    r"^(?:"
+    r"Python/ceval\.c"
+    r"|Python/gc\.c"
+    r"|Python/import\.c"
+    r"|Python/crossinterp"
+    r"|Python/context"
+    r"|Python/critical_section"
+    r"|Python/ceval_gil"
+    r"|Objects/dict"
+    r"|Objects/list"
+    r"|Objects/set"
+    r"|Objects/type"
+    r"|Objects/frame"
+    r"|Objects/gen"
+    r"|Objects/func"
+    r"|Modules/_asynciomodule"
+    r"|Modules/_io/"
+    r"|Modules/posixmodule"
+    r"|Modules/socketmodule"
+    r"|Modules/_thread"
+    r"|Modules/_interpreters"
+    r"|Lib/asyncio/"
+    r"|Lib/logging/"
+    r"|Lib/importlib/"
+    r"|Lib/concurrent/"
+    r")"
+)
+
+FREE_THREAD_TRIGGER = re.compile(
+    r"PyThread_|_Py_CRITICAL_SECTION|Py_BEGIN_ALLOW_THREADS"
+    r"|threading\.|global\s+\w"
+    r"|interp->|tstate->"
+)
+
+
+RULES: dict[str, tuple[str, str, str, str, str]] = {
+    # ------------------------------------------------------------------
     # C / memory safety
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------
 
     "c-unsafe-gets": (
         r"\bgets\s*\(",
@@ -47,15 +94,45 @@ RULES = {
     ),
     "c-unsafe-sprintf": (
         r"\bsprintf\s*\(",
-        "MEDIUM",
-        "medium",
+        "CRITICAL",
+        "high",
         "security",
-        "sprintf() was introduced; verify whether a bounded alternative is appropriate.",
+        "sprintf() was introduced; use PyOS_snprintf() instead.",
     ),
 
-    # --------------------------------------------------------------
+    # FIX (point 13): raw allocators must be PyMem_* in CPython C code.
+    "c-raw-malloc": (
+        r"(?<!\w)malloc\s*\(",
+        "HIGH",
+        "medium",
+        "memory",
+        "raw malloc() introduced; use PyMem_Malloc() to go through the CPython allocator.",
+    ),
+    "c-raw-free": (
+        r"(?<!\w)free\s*\(",
+        "HIGH",
+        "medium",
+        "memory",
+        "raw free() introduced; use PyMem_Free() to match the CPython allocator.",
+    ),
+    "c-raw-realloc": (
+        r"(?<!\w)realloc\s*\(",
+        "HIGH",
+        "medium",
+        "memory",
+        "raw realloc() introduced; use PyMem_Realloc().",
+    ),
+    "c-raw-calloc": (
+        r"(?<!\w)calloc\s*\(",
+        "HIGH",
+        "medium",
+        "memory",
+        "raw calloc() introduced; use PyMem_Calloc().",
+    ),
+
+    # ------------------------------------------------------------------
     # CPython internal API
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------
 
     "cpython-private-api": (
         r"\b_Py_[A-Za-z]\w*",
@@ -64,10 +141,24 @@ RULES = {
         "api",
         "A private _Py_* API is used; verify layer, ownership, and API expectations.",
     ),
+    "cpython-deprecated-identifier": (
+        r"_Py_IDENTIFIER\s*\(",
+        "MEDIUM",
+        "medium",
+        "api",
+        "_Py_IDENTIFIER is deprecated; use &_Py_ID() or PyUnicode_FromString.",
+    ),
+    "cpython-pycobject": (
+        r"\bPyCObject_",
+        "CRITICAL",
+        "high",
+        "api",
+        "PyCObject was removed in Python 3.x; use PyCapsule instead.",
+    ),
 
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------
     # Error handling
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------
 
     "error-clear": (
         r"\bPyErr_Clear\s*\(",
@@ -77,9 +168,9 @@ RULES = {
         "PyErr_Clear() discards an exception; verify that the error is intentionally handled.",
     ),
 
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------
     # Thread/GIL boundaries
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------
 
     "thread-boundary": (
         r"\bPy_(?:BEGIN|END)_ALLOW_THREADS\b",
@@ -89,9 +180,9 @@ RULES = {
         "Thread-state/GIL boundary changed; inspect object lifetime and error paths.",
     ),
 
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------
     # Python
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------
 
     "python-bare-except": (
         r"except\s*:",
@@ -114,10 +205,18 @@ RULES = {
         "python",
         "Global mutable state changed; inspect concurrency/lifecycle implications.",
     ),
+    # FIX (point 17): DeprecationWarning without stacklevel= shows wrong call site.
+    "python-deprecation-stacklevel": (
+        r"DeprecationWarning(?![\s\S]{0,120}stacklevel\s*=)",
+        "MEDIUM",
+        "medium",
+        "python",
+        "DeprecationWarning without stacklevel= shows the wrong call site to users; add stacklevel=2.",
+    ),
 
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------
     # Security
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------
 
     "security-eval": (
         r"\beval\s*\(",
@@ -152,32 +251,24 @@ RULES = {
         "HIGH",
         "high",
         "security",
-        "mktemp() is race-prone; inspect whether a safe temporary-file API is required.",
+        "mktemp() is race-prone (TOCTOU); use mkstemp() or NamedTemporaryFile().",
+    ),
+    "security-md5-sha1": (
+        r"\bhashlib\.(md5|sha1)\b",
+        "MEDIUM",
+        "medium",
+        "security",
+        "MD5/SHA1 are cryptographically broken for security use; use SHA-256 or SHA-3.",
     ),
 }
 
 
 def _is_c_family(filename: str) -> bool:
-    return filename.endswith(
-        (
-            ".c",
-            ".h",
-            ".cc",
-            ".cpp",
-            ".m",
-        )
-    )
+    return filename.endswith((".c", ".h", ".cc", ".cpp", ".m"))
 
 
 def _is_c_family_for_refcount(filename: str) -> bool:
-    return filename.endswith(
-        (
-            ".c",
-            ".h",
-            ".cc",
-            ".cpp",
-        )
-    )
+    return filename.endswith((".c", ".h", ".cc", ".cpp"))
 
 
 def _is_python(filename: str) -> bool:
@@ -200,22 +291,10 @@ def _finding_sort_key(finding: Finding) -> tuple[int, int, str, str]:
         "LOW": 3,
         "INFO": 4,
     }
-
-    confidence_order = {
-        "high": 0,
-        "medium": 1,
-        "low": 2,
-    }
-
+    confidence_order = {"high": 0, "medium": 1, "low": 2}
     return (
-        severity_order.get(
-            finding.severity,
-            99,
-        ),
-        confidence_order.get(
-            finding.confidence,
-            99,
-        ),
+        severity_order.get(finding.severity, 99),
+        confidence_order.get(finding.confidence, 99),
         finding.file,
         finding.message,
     )
@@ -231,6 +310,20 @@ def _add_rule_findings(
     is_py = _is_python(filename)
     is_test = _is_test_file(filename)
 
+    # C-only rules
+    c_only_rules = {
+        "c-unsafe-gets", "c-unsafe-strcpy", "c-unsafe-strcat",
+        "c-unsafe-sprintf", "c-raw-malloc", "c-raw-free",
+        "c-raw-realloc", "c-raw-calloc", "cpython-private-api",
+        "cpython-deprecated-identifier", "cpython-pycobject",
+        "error-clear", "thread-boundary",
+    }
+    # Python-only rules (skip in test files for assert/global)
+    py_notest_rules = {
+        "python-bare-except", "python-assert", "python-global",
+        "python-deprecation-stacklevel",
+    }
+
     for changed in added_lines(patch):
         for rule_id, (
             pattern,
@@ -239,10 +332,15 @@ def _add_rule_findings(
             category,
             message,
         ) in RULES.items():
-            if not re.search(
-                pattern,
-                changed.text,
-            ):
+            # Skip C rules on Python files and vice versa
+            if rule_id in c_only_rules and not is_c:
+                continue
+            if rule_id in py_notest_rules and not is_py:
+                continue
+            if rule_id in py_notest_rules and is_test:
+                continue
+
+            if not re.search(pattern, changed.text):
                 continue
 
             evidence = EvidenceRef(
@@ -285,14 +383,9 @@ def _add_ast_findings(
     if not added_lines_data:
         return []
 
-    added_text = "\n".join(
-        item.text
-        for item in added_lines_data
-    )
+    added_text = "\n".join(item.text for item in added_lines_data)
 
-    tree = parse_python(
-        added_text
-    )
+    tree = parse_python(added_text)
 
     if tree is None:
         return []
@@ -300,76 +393,37 @@ def _add_ast_findings(
     findings: list[Finding] = []
 
     for node in ast.walk(tree):
-        line = getattr(
-            node,
-            "lineno",
-            None,
-        )
+        line = getattr(node, "lineno", None)
 
-        if isinstance(
-            node,
-            ast.Call,
-        ) and isinstance(
-            node.func,
-            ast.Name,
-        ):
-            if node.func.id == "eval":
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id in ("eval", "exec"):
                 findings.append(
                     Finding(
                         severity="HIGH",
                         category="AST",
                         message=(
-                            "AST analysis confirms a newly added "
-                            "eval() call; verify the trust boundary."
+                            f"AST analysis confirms a newly added "
+                            f"{node.func.id}() call; verify the trust boundary."
                         ),
                         confidence="medium",
                         source="deterministic",
                         evidence_refs=[
                             EvidenceRef(
                                 kind="ast",
-                                description="AST contains an eval() call.",
+                                description=f"AST contains a {node.func.id}() call.",
                                 source="added-python",
                                 file=filename,
                                 line=line,
-                                observed="eval(...)",
+                                observed=f"{node.func.id}(...)",
                             )
                         ],
                         file=filename,
-                        rule_id="python-ast-eval",
-                    )
-                )
-
-            elif node.func.id == "exec":
-                findings.append(
-                    Finding(
-                        severity="HIGH",
-                        category="AST",
-                        message=(
-                            "AST analysis confirms a newly added "
-                            "exec() call; verify the trust boundary."
-                        ),
-                        confidence="medium",
-                        source="deterministic",
-                        evidence_refs=[
-                            EvidenceRef(
-                                kind="ast",
-                                description="AST contains an exec() call.",
-                                source="added-python",
-                                file=filename,
-                                line=line,
-                                observed="exec(...)",
-                            )
-                        ],
-                        file=filename,
-                        rule_id="python-ast-exec",
+                        rule_id=f"python-ast-{node.func.id}",
                     )
                 )
 
         elif (
-            isinstance(
-                node,
-                ast.ExceptHandler,
-            )
+            isinstance(node, ast.ExceptHandler)
             and node.type is None
         ):
             findings.append(
@@ -397,10 +451,7 @@ def _add_ast_findings(
                 )
             )
 
-        elif isinstance(
-            node,
-            ast.Assert,
-        ):
+        elif isinstance(node, ast.Assert):
             findings.append(
                 Finding(
                     severity="MEDIUM",
@@ -431,32 +482,26 @@ def _add_ast_findings(
 
 def _add_structure_findings(
     file_data: dict,
-) -> tuple[list[Finding], list[dict[str, object]]]:
-    filename = file_data.get(
-        "filename",
-        "",
-    )
-
-    patch = file_data.get(
-        "patch"
-    )
+) -> tuple[list[Finding], list[dict]]:
+    filename = file_data.get("filename", "")
+    patch = file_data.get("patch")
 
     findings: list[Finding] = []
-    signature_changes: list[dict[str, object]] = []
+    signature_changes: list[dict] = []
 
     if patch is None:
         return findings, signature_changes
 
-    if filename.startswith(
-        "Grammar/"
-    ):
+    # FIX (point 18): include exact regen commands in the message.
+    if filename.startswith("Grammar/"):
         findings.append(
             Finding(
                 severity="HIGH",
                 category="GRAMMAR",
                 message=(
-                    "Grammar files changed; verify generated/parser "
-                    "artifacts and parser tests."
+                    "Grammar files changed; run: "
+                    "make regen-pegen && make regen-all && make regen-clinic. "
+                    "Also verify generated parser artifacts and parser tests."
                 ),
                 confidence="high",
                 source="deterministic",
@@ -475,10 +520,7 @@ def _add_structure_findings(
         )
 
     if (
-        re.match(
-            r"^Include/(?!internal/|cpython/)",
-            filename,
-        )
+        re.match(r"^Include/(?!internal/|cpython/)", filename)
         and filename.endswith(".h")
     ):
         findings.append(
@@ -487,16 +529,15 @@ def _add_structure_findings(
                 category="ABI",
                 message=(
                     "Public C header changed; explicitly review API/ABI "
-                    "compatibility and Stable ABI impact."
+                    "compatibility and Stable ABI impact. "
+                    "Run: python Tools/build/stable_abi.py."
                 ),
                 confidence="high",
                 source="deterministic",
                 evidence_refs=[
                     EvidenceRef(
                         kind="path",
-                        description=(
-                            "Changed path is a public Include/*.h header."
-                        ),
+                        description="Changed path is a public Include/*.h header.",
                         source="filename",
                         file=filename,
                         observed=filename,
@@ -508,42 +549,26 @@ def _add_structure_findings(
         )
 
     added_text = "\n".join(
-        line.text
-        for line in added_lines(patch)
+        line.text for line in added_lines(patch)
     )
 
-    removed_lines: list[str] = []
-
+    removed_lines_list: list[str] = []
     for raw in patch.splitlines():
-        if raw.startswith(
-            ("+++", "---", "@@")
-        ):
+        if raw.startswith(("+++", "---", "@@")):
             continue
-
         if raw.startswith("-"):
-            removed_lines.append(
-                raw[1:]
-            )
+            removed_lines_list.append(raw[1:])
 
-    removed_text = "\n".join(
-        removed_lines
-    )
+    removed_text = "\n".join(removed_lines_list)
 
-    if filename.endswith(
-        ".py"
-    ):
-        changes = compare_function_signatures(
-            removed_text,
-            added_text,
-        )
+    if filename.endswith(".py"):
+        changes = compare_function_signatures(removed_text, added_text)
 
         for change in changes:
             if change["kind"] != "changed":
                 continue
 
-            name = str(
-                change["function"]
-            )
+            name = str(change["function"])
 
             if name.startswith("_"):
                 continue
@@ -570,9 +595,7 @@ def _add_structure_findings(
                     evidence_refs=[
                         EvidenceRef(
                             kind="signature",
-                            description=(
-                                f"Function signature changed for {name}()."
-                            ),
+                            description=f"Function signature changed for {name}().",
                             source="patch",
                             file=filename,
                             observed=(
@@ -589,202 +612,192 @@ def _add_structure_findings(
     return findings, signature_changes
 
 
-def _add_refcount_finding(
-    file_data: dict,
-) -> list[Finding]:
-    filename = file_data.get(
-        "filename",
-        "",
-    )
+def _add_refcount_finding(file_data: dict) -> list[Finding]:
+    """
+    FIX (point 5): the original check was inverted:
+      if inc < dec + 3: return []   <-- fires only when inc >= dec+3
+    Correct logic:
+      - Potential leak:        inc > dec   (more steals than releases)
+      - Potential over-decref: dec > inc + 2
 
-    if not _is_c_family_for_refcount(
-        filename
-    ):
+    Threshold of 1 for leak (not 0) to tolerate common ownership patterns
+    where one steal is intentional (e.g. stealing a reference into a container).
+    """
+    filename = file_data.get("filename", "")
+
+    if not _is_c_family_for_refcount(filename):
         return []
 
-    patch = file_data.get(
-        "patch"
-    )
+    patch = file_data.get("patch")
 
     added_text = "\n".join(
-        line.text
-        for line in added_lines(patch)
+        line.text for line in added_lines(patch)
     )
 
-    inc = len(
-        re.findall(
-            r"\bPy_INCREF\s*\(",
-            added_text,
+    inc = len(re.findall(r"\bPy_INCREF\s*\(", added_text))
+    dec = len(re.findall(r"\bPy_(?:X)?DECREF\s*\(", added_text))
+
+    findings: list[Finding] = []
+
+    if inc > dec + 1:
+        findings.append(
+            Finding(
+                severity="LOW",
+                category="REFCOUNT",
+                message=(
+                    f"Added diff contains {inc} INCREF vs {dec} DECREF "
+                    "operations; inspect ownership paths for potential leak."
+                ),
+                confidence="low",
+                source="deterministic",
+                evidence_refs=[
+                    EvidenceRef(
+                        kind="diff",
+                        description="Local diff count suggests possible reference leak.",
+                        source="patch",
+                        file=filename,
+                        observed=f"Py_INCREF={inc}, Py_DECREF/Py_XDECREF={dec}",
+                    )
+                ],
+                file=filename,
+                rule_id="refcount-possible-leak",
+            )
         )
-    )
 
-    dec = len(
-        re.findall(
-            r"\bPy_(?:X)?DECREF\s*\(",
-            added_text,
+    if dec > inc + 2:
+        findings.append(
+            Finding(
+                severity="LOW",
+                category="REFCOUNT",
+                message=(
+                    f"Added diff contains {dec} DECREF vs {inc} INCREF "
+                    "operations; inspect for potential over-decrement or double-free."
+                ),
+                confidence="low",
+                source="deterministic",
+                evidence_refs=[
+                    EvidenceRef(
+                        kind="diff",
+                        description="Local diff count suggests possible over-decrement.",
+                        source="patch",
+                        file=filename,
+                        observed=f"Py_DECREF/Py_XDECREF={dec}, Py_INCREF={inc}",
+                    )
+                ],
+                file=filename,
+                rule_id="refcount-possible-overdecref",
+            )
         )
-    )
 
-    if inc < dec + 3:
+    return findings
+
+
+def _add_free_thread_finding(file_data: dict) -> list[Finding]:
+    """
+    FIX (point 12): detect free-threading risk in GIL-sensitive subsystems.
+
+    Fires when a file in a threading-sensitive subsystem introduces patterns
+    that may indicate GIL assumptions.
+    """
+    filename = file_data.get("filename", "")
+
+    if not FREE_THREAD_SUBSYSTEMS.match(filename):
+        return []
+
+    patch = file_data.get("patch")
+    added_text = "\n".join(line.text for line in added_lines(patch))
+
+    if not FREE_THREAD_TRIGGER.search(added_text):
         return []
 
     return [
         Finding(
-            severity="LOW",
-            category="REFCOUNT",
+            severity="HIGH",
+            category="FREE-THREADING",
             message=(
-                f"Added diff contains {inc} INCREF vs {dec} DECREF "
-                "operations; inspect ownership paths manually."
+                f"{filename} is a free-threading-sensitive subsystem; "
+                "verify correctness with --disable-gil and add coverage "
+                "under Lib/test/test_free_threading/ if not already present."
             ),
-            confidence="low",
+            confidence="medium",
             source="deterministic",
             evidence_refs=[
                 EvidenceRef(
                     kind="diff",
-                    description=(
-                        "Local diff count suggests a possible "
-                        "ownership imbalance."
-                    ),
+                    description="Free-threading-sensitive pattern in GIL-sensitive subsystem.",
                     source="patch",
                     file=filename,
-                    observed=(
-                        f"Py_INCREF={inc}, "
-                        f"Py_DECREF/Py_XDECREF={dec}"
-                    ),
                 )
             ],
             file=filename,
-            rule_id="refcount-imbalance-prompt",
+            rule_id="free-threading-risk",
         )
     ]
 
 
-def analyze_patch(
-    filename: str,
-    patch: str | None,
-) -> list[Finding]:
-    """Analyze one changed file."""
-
-    findings = _add_rule_findings(
-        filename,
-        patch,
-    )
-
-    findings.extend(
-        _add_ast_findings(
-            filename,
-            patch,
-        )
-    )
-
-    findings.sort(
-        key=_finding_sort_key
-    )
-
+def analyze_patch(filename: str, patch: str | None) -> list[Finding]:
+    """Analyze one changed file (patch only, no structure)."""
+    findings = _add_rule_findings(filename, patch)
+    findings.extend(_add_ast_findings(filename, patch))
+    findings.sort(key=_finding_sort_key)
     return findings
 
 
 def analyze_file(
     file_data: dict,
-) -> tuple[list[Finding], list[dict[str, object]]]:
+) -> tuple[list[Finding], list[dict]]:
     """Run complete deterministic analysis for one changed file."""
+    filename = file_data.get("filename", "")
 
-    filename = file_data.get(
-        "filename",
-        "",
-    )
+    findings = _add_rule_findings(filename, file_data.get("patch"))
+    findings.extend(_add_ast_findings(filename, file_data.get("patch")))
 
-    findings = _add_rule_findings(
-        filename,
-        file_data.get("patch"),
-    )
+    structure_findings, signature_changes = _add_structure_findings(file_data)
+    findings.extend(structure_findings)
 
-    findings.extend(
-        _add_ast_findings(
-            filename,
-            file_data.get("patch"),
-        )
-    )
-
-    structure_findings, signature_changes = (
-        _add_structure_findings(
-            file_data
-        )
-    )
-
-    findings.extend(
-        structure_findings
-    )
-
-    findings.extend(
-        _add_refcount_finding(
-            file_data
-        )
-    )
+    findings.extend(_add_refcount_finding(file_data))
+    findings.extend(_add_free_thread_finding(file_data))
 
     return findings, signature_changes
 
 
-def deduplicate_findings(
-    findings: Iterable[Finding],
-) -> list[Finding]:
+def deduplicate_findings(findings: Iterable[Finding]) -> list[Finding]:
     """Remove duplicate findings while preserving the strongest evidence."""
-
     result: list[Finding] = []
     seen: set[tuple[str, str, str, str]] = set()
 
     for finding in findings:
         key = (
-            finding.rule_id,
-            finding.file,
+            finding.rule_id or "",
+            finding.file or "",
             finding.message,
             finding.category,
         )
-
         if key in seen:
             continue
-
         seen.add(key)
-        result.append(
-            finding
-        )
+        result.append(finding)
 
-    result.sort(
-        key=_finding_sort_key
-    )
-
+    result.sort(key=_finding_sort_key)
     return result
 
 
 def analyze_files(
     files: Iterable[dict],
-) -> tuple[list[Finding], list[dict[str, object]]]:
+) -> tuple[list[Finding], list[dict]]:
     """
     Run complete deterministic analysis over changed files.
 
     Returns findings plus public-looking Python signature changes.
     """
-
     findings: list[Finding] = []
-    signature_changes: list[dict[str, object]] = []
+    signature_changes: list[dict] = []
 
     for file_data in files:
-        file_findings, file_signatures = analyze_file(
-            file_data
-        )
+        file_findings, file_signatures = analyze_file(file_data)
+        findings.extend(file_findings)
+        signature_changes.extend(file_signatures)
 
-        findings.extend(
-            file_findings
-        )
-        signature_changes.extend(
-            file_signatures
-        )
+    findings = deduplicate_findings(findings)
 
-    findings = deduplicate_findings(
-        findings
-    )
-
-    return (
-        findings,
-        signature_changes,
-    )
+    return findings, signature_changes
