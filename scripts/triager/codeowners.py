@@ -41,10 +41,7 @@ def parse_codeowners(
     ):
         line = raw.strip()
 
-        if not line:
-            continue
-
-        if line.startswith("#"):
+        if not line or line.startswith("#"):
             continue
 
         line = re.split(
@@ -72,17 +69,11 @@ def parse_codeowners(
     return rules
 
 
-def _normalize(
-    value: str,
-) -> str:
-    return value.lstrip("/")
-
-
 def _regex(
     pattern: str,
 ) -> re.Pattern[str] | None:
     """
-    Build the conservative CODEOWNERS matcher used by the legacy triager.
+    Build the conservative CODEOWNERS matcher used by the triager.
 
     Unsupported character classes and negation are deliberately rejected
     rather than approximated.
@@ -127,27 +118,17 @@ def _regex(
                     and pattern[index + 1] == "/"
                 ):
                     index += 1
-                    output.append(
-                        r"(?:.*/)?"
-                    )
+                    output.append(r"(?:.*/)?")
                 else:
-                    output.append(
-                        r".*"
-                    )
+                    output.append(r".*")
             else:
-                output.append(
-                    r"[^/]*"
-                )
+                output.append(r"[^/]*")
 
         elif character == "?":
-            output.append(
-                r"[^/]"
-            )
+            output.append(r"[^/]")
 
         else:
-            output.append(
-                re.escape(character)
-            )
+            output.append(re.escape(character))
 
         index += 1
 
@@ -165,26 +146,17 @@ def _matches(
     """
     Match one filename against one CODEOWNERS pattern.
 
-    This intentionally mirrors the existing triager behavior.
+    Leading ``/`` on a pattern is preserved so root-relative rules remain
+    anchored to the repository root.
     """
 
-    normalized_pattern = _normalize(
-        pattern
-    )
+    normalized_filename = filename.lstrip("/")
 
-    normalized_filename = _normalize(
-        filename
-    )
-
-    matcher = _regex(
-        normalized_pattern
-    )
+    matcher = _regex(pattern)
 
     return bool(
         matcher
-        and matcher.match(
-            normalized_filename
-        )
+        and matcher.match(normalized_filename)
     )
 
 

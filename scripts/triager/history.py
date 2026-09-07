@@ -15,8 +15,114 @@ rather than:
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from statistics import median, quantiles
+from typing import Any
+
+
+def _as_int(value: Any, default: int = 0) -> int:
+    """Convert a value to a non-negative integer when possible."""
+
+    try:
+        result = int(value or 0)
+    except (TypeError, ValueError):
+        return default
+
+    return max(0, result)
+
+
+def _base_ref(pr: Mapping[str, Any]) -> str | None:
+    """Return a normalized base branch name."""
+
+    base = pr.get("base")
+
+    if not isinstance(base, Mapping):
+        return None
+
+    ref = base.get("ref")
+
+    if ref is None:
+        return None
+
+    ref = str(ref).strip()
+
+    return ref or None
+
+
+def _label_names(pr: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return normalized, deterministic PR label names."""
+
+    labels = pr.get("labels", [])
+
+    if not isinstance(labels, Iterable) or isinstance(
+        labels,
+        (str, bytes, Mapping),
+    ):
+        return ()
+
+    names: set[str] = set()
+
+    for label in labels:
+        if isinstance(label, Mapping):
+            name = label.get("name")
+        else:
+            name = label
+
+        if name is None:
+            continue
+
+        normalized = str(name).strip().lower()
+
+        if normalized:
+            names.add(normalized)
+
+    return tuple(sorted(names))
+
+
+def _normalize_pr(pr: Any) -> dict[str, Any] | None:
+    """
+    Normalize the fields required by historical analysis.
+
+    Invalid records are ignored rather than allowed to poison
+    the complete historical sample.
+    """
+
+    if not isinstance(pr, Mapping):
+        return None
+
+    try:
+        return {
+            "number": pr.get("number"),
+            "additions": _as_int(
+                pr.get("additions"),
+            ),
+            "deletions": _as_int(
+                pr.get("deletions"),
+            ),
+            "changed_files": _as_int(
+                pr.get("changed_files"),
+            ),
+            "base": _base_ref(pr),
+            "labels": _label_names(pr),
+        }
+    except Exception:
+        return None
+
+
+def _normalized_rows(
+    prs: Iterable[dict],
+) -> list[dict[str, Any]]:
+    """Return valid, normalized PR records."""
+
+    rows: list[dict[str, Any]] = []
+
+    for pr in prs:
+        row = _normalize_pr(pr)
+
+        if row is not None:
+            rows.append(row)
+
+    return rows
 
 
 def summarize_sizes(
@@ -24,54 +130,15 @@ def summarize_sizes(
 ) -> dict:
     """
     Build a reproducible size baseline.
+
+    Invalid historical records are skipped so that one malformed
+    API response does not invalidate the complete sample.
     """
 
-    rows: list[dict] = []
-
-    for pr in prs:
-        try:
-            rows.append(
-                {
-                    "number": pr.get(
-                        "number"
-                    ),
-                    "additions": int(
-                        pr.get(
-                            "additions",
-                            0,
-                        )
-                        or 0
-                    ),
-                    "deletions": int(
-                        pr.get(
-                            "deletions",
-                            0,
-                        )
-                        or 0
-                    ),
-                    "changed_files": int(
-                        pr.get(
-                            "changed_files",
-                            0,
-                        )
-                        or 0
-                    ),
-                    "base": (
-                        pr.get("base")
-                        or {}
-                    ).get("ref"),
-                }
-            )
-
-        except (
-            TypeError,
-            ValueError,
-        ):
-            continue
+    rows = _normalized_rows(prs)
 
     total_changes = [
-        row["additions"]
-        + row["deletions"]
+        row["additions"] + row["deletions"]
         for row in rows
     ]
 
@@ -82,7 +149,16 @@ def summarize_sizes(
 
     result = {
         "sample_size": len(rows),
-        "rows": rows,
+        "rows": [
+            {
+                "number": row["number"],
+                "additions": row["additions"],
+                "deletions": row["deletions"],
+                "changed_files": row["changed_files"],
+                "base": row["base"],
+            }
+            for row in rows
+        ],
         "size": {
             "median": (
                 median(total_changes)
@@ -134,6 +210,8 @@ def _percentile(
 ) -> float:
     """
     Calculate an interpolated percentile.
+
+    The percentile is expected to be between 0 and 1.
     """
 
     if not values:
@@ -141,6 +219,14 @@ def _percentile(
 
     if len(values) == 1:
         return float(values[0])
+
+    percentile = max(
+        0.0,
+        min(
+            1.0,
+            float(percentile),
+        ),
+    )
 
     values = sorted(values)
 
@@ -153,7 +239,7 @@ def _percentile(
     index = max(
         0,
         min(
-            99,
+            98,
             int(percentile * 100) - 1,
         ),
     )
@@ -171,11 +257,15 @@ def contextual_size_signal(
 ) -> dict:
     """
     Compare a PR with a supplied historical baseline.
+
+    Historical size is only a contextual signal. It does not
+    establish that a PR is incorrect or unsafe.
     """
 
-    total = additions + deletions
+    total = _as_int(additions) + _as_int(deletions)
+    changed_files = _as_int(changed_files)
 
-    if not baseline:
+    if not isinstance(baseline, Mapping):
         return {
             "status": "unknown",
             "reason": (
@@ -193,6 +283,12 @@ def contextual_size_signal(
         {},
     )
 
+    if not isinstance(size, Mapping):
+        size = {}
+
+    if not isinstance(files, Mapping):
+        files = {}
+
     p95 = size.get(
         "p95",
         0,
@@ -202,6 +298,16 @@ def contextual_size_signal(
         "p95",
         0,
     )
+
+    try:
+        p95 = float(p95 or 0)
+    except (TypeError, ValueError):
+        p95 = 0
+
+    try:
+        file_p95 = float(file_p95 or 0)
+    except (TypeError, ValueError):
+        file_p95 = 0
 
     flags: list[str] = []
 
@@ -218,6 +324,16 @@ def contextual_size_signal(
             "changed_files_above_p95"
         )
 
+    sample_size = baseline.get(
+        "sample_size",
+        0,
+    )
+
+    try:
+        sample_size = _as_int(sample_size)
+    except (TypeError, ValueError):
+        sample_size = 0
+
     return {
         "status": (
             "unusual"
@@ -225,70 +341,71 @@ def contextual_size_signal(
             else "typical"
         ),
         "flags": flags,
-        "sample_size": baseline.get(
-            "sample_size",
-            0,
-        ),
+        "sample_size": sample_size,
     }
+
+
+def _stratification_key(
+    pr: Mapping[str, Any],
+) -> tuple[str, tuple[str, ...]]:
+    """Build a stable branch/label stratification key."""
+
+    base = _base_ref(pr) or "unknown"
+    labels = _label_names(pr)
+
+    # Keep the historical grouping bounded. A PR can have many
+    # labels, but the first three sorted labels provide a stable
+    # and reproducible coarse grouping.
+    return base, labels[:3]
 
 
 def stratify(
     prs: Iterable[dict],
 ) -> dict:
     """
-    Produce simple branch/label-stratified baselines.
+    Produce branch/label-stratified baselines.
 
-    This is an initial implementation.
+    Groups are deterministic and use at most the first three
+    normalized labels.
 
-    Later we will stratify by:
-        branch
-        component
-        PR type
-        time period
+    Historical statistics remain contextual and should not be
+    interpreted as proof of correctness or risk.
     """
 
     groups: defaultdict[
-        tuple,
+        tuple[str, tuple[str, ...]],
         list[dict],
     ] = defaultdict(list)
 
     for pr in prs:
-        base = (
-            pr.get("base")
-            or {}
-        ).get(
-            "ref"
-        ) or "unknown"
+        if not isinstance(pr, Mapping):
+            continue
 
-        labels = tuple(
-            sorted(
-                (
-                    label.get("name")
-                    or ""
-                ).lower()
-                for label in pr.get(
-                    "labels",
-                    [],
-                )
+        base, labels = _stratification_key(pr)
+
+        groups[
+            (
+                base,
+                labels,
             )
-        )
+        ].append(pr)
 
-        key = (
-            base,
-            labels[:3],
-        )
+    result: dict[str, dict] = {}
 
-        groups[key].append(pr)
+    for (
+        base,
+        labels,
+    ), rows in sorted(
+        groups.items(),
+        key=lambda item: (
+            item[0][0],
+            item[0][1],
+        ),
+    ):
+        label_text = ",".join(labels)
 
-    return {
-        (
-            f"{base}|"
-            f"{','.join(labels)}"
-        ): summarize_sizes(
-            rows
-        )
-        for (
-            base,
-            labels,
-        ), rows in groups.items()
-    }
+        result[
+            f"{base}|{label_text}"
+        ] = summarize_sizes(rows)
+
+    return result

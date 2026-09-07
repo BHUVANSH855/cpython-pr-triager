@@ -1,15 +1,3 @@
-"""
-GitHub evidence collection for CPython PR triage.
-
-This module owns network access, caching, retries, pagination, and
-repository-content retrieval.
-
-Fixes applied:
-- Added pull_sample() method — was called in analyze.py but missing (point 1).
-- API_VERSION corrected to "2022-11-28" (was "2026-03-10", a future date) (point 9).
-- Timeline events now get a "bot" key set during normalization (point 2).
-"""
-
 from __future__ import annotations
 
 import base64
@@ -35,8 +23,6 @@ DEFAULT_CACHE_TTL = int(
     os.environ.get("CPYTHON_TRIAGER_CACHE_TTL", "900")
 )
 
-# FIX (point 9): was "2026-03-10" which is a future/invalid date.
-# The stable GitHub API version is 2022-11-28.
 API_VERSION = "2022-11-28"
 USER_AGENT = "cpython-pr-triager"
 
@@ -44,7 +30,6 @@ DEFAULT_TIMEOUT = 45
 DEFAULT_RETRIES = 4
 DEFAULT_PER_PAGE = 100
 
-# Known bot logins for timeline normalization.
 _DEFAULT_BOT_LOGINS: frozenset[str] = frozenset({
     "miss-islington",
     "bedevere-bot",
@@ -65,18 +50,6 @@ class GitHubError(RuntimeError):
 class GitHub:
     """
     Small standard-library-only GitHub API client.
-
-    Responsibilities:
-    - authentication
-    - request construction / response decoding
-    - caching (atomic writes, TTL)
-    - retries with exponential backoff
-    - pagination (complete, not first-page-only)
-    - rate-limit metadata
-    - repository content retrieval
-    - issue/PR evidence collection
-    - CODEOWNERS lookup
-    - historical PR sampling
     """
 
     def __init__(
@@ -89,7 +62,11 @@ class GitHub:
         retries: int = DEFAULT_RETRIES,
         opener: Callable[..., Any] | None = None,
     ) -> None:
-        self.token = token if token is not None else os.environ.get("GITHUB_TOKEN", "")
+        self.token = (
+            token
+            if token is not None
+            else os.environ.get("GITHUB_TOKEN", "")
+        )
         self.repo = repo
         self.api = f"https://api.github.com/repos/{repo}"
         self.cache_dir = Path(cache_dir)
@@ -102,10 +79,6 @@ class GitHub:
         self.rate_remaining: str | None = None
         self.rate_reset: str | None = None
 
-    # ------------------------------------------------------------------
-    # Request / cache infrastructure
-    # ------------------------------------------------------------------
-
     def _cache_path(self, url: str) -> Path:
         digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
         return self.cache_dir / f"{digest}.json"
@@ -113,10 +86,12 @@ class GitHub:
     def _read_cache(self, path: Path) -> Any | None:
         if self.cache_ttl <= 0 or not path.exists():
             return None
+
         try:
             age = time.time() - path.stat().st_mtime
             if age > self.cache_ttl:
                 return None
+
             data = json.loads(path.read_text(encoding="utf-8"))
             self.cache_hits += 1
             return data
@@ -124,16 +99,24 @@ class GitHub:
             return None
 
     def _write_cache(self, path: Path, data: Any) -> None:
-        """Write cache data atomically."""
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             fd, temporary = tempfile.mkstemp(
-                prefix=f"{path.name}.", suffix=".tmp", dir=str(path.parent)
+                prefix=f"{path.name}.",
+                suffix=".tmp",
+                dir=str(path.parent),
             )
             temporary_path = Path(temporary)
+
             try:
-                with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                with os.fdopen(
+                    fd,
+                    "w",
+                    encoding="utf-8",
+                    newline="\n",
+                ) as handle:
                     json.dump(data, handle, ensure_ascii=False)
+
                 temporary_path.replace(path)
             except Exception:
                 try:
@@ -150,15 +133,19 @@ class GitHub:
             "User-Agent": USER_AGENT,
             "X-GitHub-Api-Version": API_VERSION,
         }
+
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
+
         return headers
 
     def _url(self, path_or_url: str) -> str:
         if path_or_url.startswith(("http://", "https://")):
             return path_or_url
+
         if not path_or_url.startswith("/"):
             path_or_url = f"/{path_or_url}"
+
         return self.api + path_or_url
 
     def _update_rate_limit(self, headers: Any) -> None:
@@ -166,15 +153,53 @@ class GitHub:
         self.rate_reset = headers.get("X-RateLimit-Reset")
 
     @staticmethod
-    def _retry_delay(attempt: int, headers: Any | None = None) -> float:
+    def _retry_delay(
+        attempt: int,
+        headers: Any | None = None,
+    ) -> float:
         if headers is not None:
             retry_after = headers.get("Retry-After")
             if retry_after:
                 try:
                     return max(0.0, float(retry_after))
-                except ValueError:
+                except (TypeError, ValueError):
                     pass
+
         return min(2 ** attempt, 16)
+
+    @staticmethod
+    def _http_error_message(
+        exc: urllib.error.HTTPError,
+        url: str,
+    ) -> str:
+        message = f"GitHub HTTP {exc.code}: {url}"
+
+        if exc.code == 401:
+            message += " (authentication failed)"
+        elif exc.code == 403:
+            message += " (forbidden or rate-limited)"
+        elif exc.code == 404:
+            message += " (not found)"
+
+        reason = str(getattr(exc, "reason", "") or "").strip()
+        if reason:
+            message += f": {reason}"
+
+        return message
+
+    @staticmethod
+    def _is_rate_limited(
+        exc: urllib.error.HTTPError,
+    ) -> bool:
+        headers = exc.headers or {}
+        remaining = headers.get("X-RateLimit-Remaining")
+        retry_after = headers.get("Retry-After")
+
+        return (
+            exc.code in {429, 503}
+            or bool(retry_after)
+            or str(remaining).strip() == "0"
+        )
 
     def request(
         self,
@@ -196,17 +221,31 @@ class GitHub:
         retry_count = max(retry_count, 1)
 
         for attempt in range(retry_count):
-            request = urllib.request.Request(url, headers=self._headers(), method="GET")
+            request = urllib.request.Request(
+                url,
+                headers=self._headers(),
+                method="GET",
+            )
+
             try:
                 self.calls += 1
-                with self._opener(request, timeout=self.timeout) as response:
+
+                with self._opener(
+                    request,
+                    timeout=self.timeout,
+                ) as response:
                     self._update_rate_limit(response.headers)
                     raw = response.read()
 
                 try:
                     data = json.loads(raw.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                    raise GitHubError(f"GitHub returned invalid JSON: {url}") from exc
+                except (
+                    UnicodeDecodeError,
+                    json.JSONDecodeError,
+                ) as exc:
+                    raise GitHubError(
+                        f"GitHub returned invalid JSON: {url}"
+                    ) from exc
 
                 if use_cache:
                     self._write_cache(cache_path, data)
@@ -215,33 +254,47 @@ class GitHub:
 
             except urllib.error.HTTPError as exc:
                 self._update_rate_limit(exc.headers)
-                retryable = exc.code in {408, 429, 500, 502, 503, 504}
+
+                retryable = (
+                    exc.code in {
+                        408,
+                        429,
+                        500,
+                        502,
+                        503,
+                        504,
+                    }
+                    or (
+                        exc.code == 403
+                        and self._is_rate_limited(exc)
+                    )
+                )
 
                 if retryable and attempt < retry_count - 1:
-                    time.sleep(self._retry_delay(attempt, exc.headers))
+                    time.sleep(
+                        self._retry_delay(
+                            attempt,
+                            exc.headers,
+                        )
+                    )
                     continue
 
-                message = f"GitHub HTTP {exc.code}: {url}"
-                if exc.code == 401:
-                    message += " (authentication failed)"
-                elif exc.code == 403:
-                    message += " (forbidden or rate-limited)"
-                elif exc.code == 404:
-                    message += " (not found)"
-
-                raise GitHubError(message) from exc
+                raise GitHubError(
+                    self._http_error_message(exc, url)
+                ) from exc
 
             except (urllib.error.URLError, TimeoutError) as exc:
                 if attempt < retry_count - 1:
                     time.sleep(min(2 ** attempt, 8))
                     continue
-                raise GitHubError(f"GitHub request failed: {url}: {exc}") from exc
 
-        raise GitHubError(f"GitHub request failed after retries: {url}")
+                raise GitHubError(
+                    f"GitHub request failed: {url}: {exc}"
+                ) from exc
 
-    # ------------------------------------------------------------------
-    # Pagination
-    # ------------------------------------------------------------------
+        raise GitHubError(
+            f"GitHub request failed after retries: {url}"
+        )
 
     def paginate(
         self,
@@ -258,27 +311,37 @@ class GitHub:
 
         while True:
             separator = "&" if "?" in path else "?"
-            page_path = f"{path}{separator}per_page={per_page}&page={page}"
+            page_path = (
+                f"{path}{separator}"
+                f"per_page={per_page}&page={page}"
+            )
+
             data = self.request(page_path)
 
             if not isinstance(data, list):
-                return result
+                raise GitHubError(
+                    f"Unexpected list response from GitHub: {page_path}"
+                )
 
-            result.extend(item for item in data if isinstance(item, dict))
+            result.extend(
+                item
+                for item in data
+                if isinstance(item, dict)
+            )
 
             if len(data) < per_page:
                 return result
 
             page += 1
 
-    # ------------------------------------------------------------------
-    # Basic PR evidence
-    # ------------------------------------------------------------------
-
     def pr(self, number: int) -> dict[str, Any]:
         data = self.request(f"/pulls/{number}")
+
         if not isinstance(data, dict):
-            raise GitHubError(f"Unexpected PR response for #{number}")
+            raise GitHubError(
+                f"Unexpected PR response for #{number}"
+            )
+
         return data
 
     def files(self, number: int) -> list[dict[str, Any]]:
@@ -299,26 +362,26 @@ class GitHub:
         *,
         bot_logins: frozenset[str] = _DEFAULT_BOT_LOGINS,
     ) -> list[dict[str, Any]]:
-        """
-        Fetch the issue timeline and normalize each event.
+        """Fetch and normalize the issue timeline."""
+        raw_events = self.paginate(
+            f"/issues/{number}/timeline"
+        )
 
-        FIX (point 2): The original implementation returned raw GitHub API
-        events.  Policy code filtered on event.get("bot") which was always
-        None because no "bot" key was ever set.  We now set "bot" on every
-        event so policy filters work correctly.
-        """
-        raw_events = self.paginate(f"/issues/{number}/timeline")
         normalized: list[dict[str, Any]] = []
 
         for event in raw_events:
-            # Determine the actor login from whichever field GitHub uses.
             actor = (
                 event.get("actor")
                 or event.get("user")
                 or event.get("sender")
                 or {}
             )
-            login = actor.get("login", "") if isinstance(actor, dict) else ""
+
+            login = (
+                actor.get("login", "")
+                if isinstance(actor, dict)
+                else ""
+            )
 
             is_bot = (
                 login in bot_logins
@@ -327,19 +390,27 @@ class GitHub:
 
             ev = dict(event)
             ev["bot"] = is_bot
-
-            # Normalize event kind and date for downstream consumers.
-            ev.setdefault("kind", event.get("event", "unknown"))
+            ev.setdefault(
+                "kind",
+                event.get("event", "unknown"),
+            )
             ev.setdefault("login", login)
             ev.setdefault(
                 "date",
-                event.get("created_at") or event.get("submitted_at") or "",
+                event.get("created_at")
+                or event.get("submitted_at")
+                or "",
             )
-            ev.setdefault("body", event.get("body") or "")
+            ev.setdefault(
+                "body",
+                event.get("body") or "",
+            )
 
-            # Normalize review state for review events.
             if event.get("event") == "reviewed" or event.get("state"):
-                ev.setdefault("state", event.get("state", ""))
+                ev.setdefault(
+                    "state",
+                    event.get("state", ""),
+                )
 
             normalized.append(ev)
 
@@ -349,36 +420,44 @@ class GitHub:
         """Fetch all repository labels."""
         return self.paginate("/labels")
 
-    # ------------------------------------------------------------------
-    # Issues
-    # ------------------------------------------------------------------
-
     def issue(self, number: int) -> dict[str, Any]:
         data = self.request(f"/issues/{number}")
+
         if not isinstance(data, dict):
-            raise GitHubError(f"Unexpected issue response for #{number}")
+            raise GitHubError(
+                f"Unexpected issue response for #{number}"
+            )
+
         return data
 
     def linked_issue_evidence(
         self,
         number: int,
         *,
-        bot_logins: set[str] | frozenset[str] | None = None,
+        bot_logins: set[str]
+        | frozenset[str]
+        | None = None,
     ) -> dict[str, Any]:
         """Collect normalized evidence for one linked issue."""
         issue = self.issue(number)
         comments = self.issue_comments(number)
-        # Use raw paginate for issue timeline (no PR context, no review normalization).
-        raw_tl = self.paginate(f"/issues/{number}/timeline")
+        raw_tl = self.paginate(
+            f"/issues/{number}/timeline"
+        )
 
-        bots = set(bot_logins or _DEFAULT_BOT_LOGINS)
+        bots = set(
+            bot_logins or _DEFAULT_BOT_LOGINS
+        )
+
         normalized_comments = []
 
         for comment in comments:
             user = comment.get("user") or {}
             login = user.get("login", "?")
+
             if login in bots:
                 continue
+
             normalized_comments.append(
                 {
                     "login": login,
@@ -394,6 +473,7 @@ class GitHub:
             if event.get("event") == "labeled":
                 label = event.get("label") or {}
                 actor = event.get("actor") or {}
+
                 label_history.append(
                     {
                         "label": label.get("name", "?"),
@@ -405,12 +485,18 @@ class GitHub:
             if event.get("event") == "cross-referenced":
                 source = event.get("source") or {}
                 referenced_issue = source.get("issue") or {}
-                referenced_number = referenced_issue.get("number")
+                referenced_number = referenced_issue.get(
+                    "number"
+                )
+
                 if isinstance(referenced_number, int):
                     cross_references.append(
                         {
                             "number": referenced_number,
-                            "title": referenced_issue.get("title", ""),
+                            "title": referenced_issue.get(
+                                "title",
+                                "",
+                            ),
                         }
                     )
 
@@ -434,9 +520,13 @@ class GitHub:
 
     def linked_issue_evidence_batch(
         self,
-        numbers: list[int] | tuple[int, ...] | set[int],
+        numbers: list[int]
+        | tuple[int, ...]
+        | set[int],
         *,
-        bot_logins: set[str] | frozenset[str] | None = None,
+        bot_logins: set[str]
+        | frozenset[str]
+        | None = None,
     ) -> list[dict[str, Any]]:
         """Collect normalized evidence for multiple linked issues."""
         seen: set[int] = set()
@@ -445,38 +535,51 @@ class GitHub:
         for number in numbers:
             if not isinstance(number, int):
                 continue
+
             if number <= 0 or number in seen:
                 continue
+
             seen.add(number)
 
             try:
                 result.append(
-                    self.linked_issue_evidence(number, bot_logins=bot_logins)
+                    self.linked_issue_evidence(
+                        number,
+                        bot_logins=bot_logins,
+                    )
                 )
             except Exception as exc:
-                result.append({"number": number, "error": str(exc)})
+                result.append(
+                    {
+                        "number": number,
+                        "error": str(exc),
+                    }
+                )
 
         return result
 
     def linked_issues(
         self,
-        numbers: list[int] | tuple[int, ...] | set[int],
+        numbers: list[int]
+        | tuple[int, ...]
+        | set[int],
     ) -> list[dict[str, Any]]:
         """Fetch a collection of explicitly identified linked issues."""
         seen: set[int] = set()
         result: list[dict[str, Any]] = []
 
         for number in numbers:
-            if not isinstance(number, int) or number <= 0 or number in seen:
+            if (
+                not isinstance(number, int)
+                or number <= 0
+                or number in seen
+            ):
                 continue
+
             seen.add(number)
             result.append(self.issue(number))
 
         return result
-
-    # ------------------------------------------------------------------
-    # CI
-    # ------------------------------------------------------------------
 
     def check_runs(
         self,
@@ -484,11 +587,15 @@ class GitHub:
         *,
         per_page: int = DEFAULT_PER_PAGE,
     ) -> dict[str, Any]:
-        """Fetch all check runs for a commit (paginated envelope)."""
+        """Fetch all check runs for a commit."""
         if per_page < 1:
             raise ValueError("per_page must be at least 1")
 
-        encoded_sha = urllib.parse.quote(sha, safe="")
+        encoded_sha = urllib.parse.quote(
+            sha,
+            safe="",
+        )
+
         page = 1
         runs: list[dict[str, Any]] = []
         total_count: int | None = None
@@ -498,19 +605,32 @@ class GitHub:
                 f"/commits/{encoded_sha}/check-runs"
                 f"?per_page={per_page}&page={page}"
             )
+
             data = self.request(path)
 
             if not isinstance(data, dict):
-                raise GitHubError(f"Unexpected check-runs response for commit {sha}")
+                raise GitHubError(
+                    f"Unexpected check-runs response "
+                    f"for commit {sha}"
+                )
 
             page_runs = data.get("check_runs", [])
-            if not isinstance(page_runs, list):
-                raise GitHubError(f"Invalid check_runs payload for commit {sha}")
 
-            runs.extend(item for item in page_runs if isinstance(item, dict))
+            if not isinstance(page_runs, list):
+                raise GitHubError(
+                    f"Invalid check_runs payload "
+                    f"for commit {sha}"
+                )
+
+            runs.extend(
+                item
+                for item in page_runs
+                if isinstance(item, dict)
+            )
 
             if total_count is None:
                 raw_total = data.get("total_count")
+
                 if isinstance(raw_total, int):
                     total_count = raw_total
 
@@ -520,47 +640,89 @@ class GitHub:
             page += 1
 
         return {
-            "total_count": total_count if total_count is not None else len(runs),
+            "total_count": (
+                total_count
+                if total_count is not None
+                else len(runs)
+            ),
             "check_runs": runs,
         }
 
     def statuses(self, sha: str) -> list[dict[str, Any]]:
-        encoded_sha = urllib.parse.quote(sha, safe="")
-        return self.paginate(f"/commits/{encoded_sha}/statuses")
+        encoded_sha = urllib.parse.quote(
+            sha,
+            safe="",
+        )
 
-    # ------------------------------------------------------------------
-    # Repository content
-    # ------------------------------------------------------------------
+        return self.paginate(
+            f"/commits/{encoded_sha}/statuses"
+        )
 
-    def content(self, path: str, ref: str | None = None) -> dict[str, Any]:
+    def content(
+        self,
+        path: str,
+        ref: str | None = None,
+    ) -> dict[str, Any]:
         encoded_path = "/".join(
-            urllib.parse.quote(component, safe="")
+            urllib.parse.quote(
+                component,
+                safe="",
+            )
             for component in path.split("/")
         )
-        suffix = ""
-        if ref is not None:
-            suffix = "?ref=" + urllib.parse.quote(ref, safe="")
 
-        data = self.request(f"/contents/{encoded_path}{suffix}")
+        suffix = ""
+
+        if ref is not None:
+            suffix = (
+                "?ref="
+                + urllib.parse.quote(
+                    ref,
+                    safe="",
+                )
+            )
+
+        data = self.request(
+            f"/contents/{encoded_path}{suffix}"
+        )
+
         if not isinstance(data, dict):
-            raise GitHubError(f"Unexpected content response for {path}")
+            raise GitHubError(
+                f"Unexpected content response for {path}"
+            )
+
         return data
 
-    def raw_content(self, path: str, ref: str | None = None) -> str | None:
+    def raw_content(
+        self,
+        path: str,
+        ref: str | None = None,
+    ) -> str | None:
         data = self.content(path, ref)
 
-        if data.get("encoding") == "base64" and data.get("content"):
+        if (
+            data.get("encoding") == "base64"
+            and data.get("content")
+        ):
             try:
-                return base64.b64decode(data["content"]).decode(
-                    "utf-8", errors="replace"
+                return base64.b64decode(
+                    data["content"]
+                ).decode(
+                    "utf-8",
+                    errors="replace",
                 )
             except (ValueError, TypeError):
                 return None
 
         download_url = data.get("download_url")
+
         if download_url:
             try:
-                raw = self.request(download_url, use_cache=False)
+                raw = self.request(
+                    download_url,
+                    use_cache=False,
+                )
+
                 if isinstance(raw, str):
                     return raw
             except GitHubError:
@@ -573,11 +735,16 @@ class GitHub:
         ref: str | None = None,
     ) -> tuple[str | None, str | None]:
         """Find CODEOWNERS at the supplied repository ref."""
-        candidates = (".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
+        candidates = (
+            ".github/CODEOWNERS",
+            "CODEOWNERS",
+            "docs/CODEOWNERS",
+        )
 
         for path in candidates:
             try:
                 text = self.raw_content(path, ref)
+
                 if text is not None:
                     return path, text
             except GitHubError:
@@ -585,10 +752,62 @@ class GitHub:
 
         return None, None
 
-    # ------------------------------------------------------------------
-    # Historical sampling — FIX (point 1): pull_sample was called from
-    # analyze.py but never implemented in this class.
-    # ------------------------------------------------------------------
+    @staticmethod
+    def _is_python_file(path: str) -> bool:
+        return (
+            path.endswith(".py")
+            or path.endswith(".pyi")
+            or path.endswith(".pyx")
+        )
+
+    def base_file_contents(
+        self,
+        files: list[dict[str, Any]],
+        base_sha: str | None,
+        errors: dict[str, str] | None = None,
+    ) -> dict[str, str]:
+        """
+        Fetch base versions of changed Python files.
+
+        Added files have no base version and are intentionally omitted.
+        Retrieval failures are recorded when an error mapping is supplied.
+        """
+        if not base_sha:
+            return {}
+
+        result: dict[str, str] = {}
+
+        for file_data in files:
+            path = file_data.get("filename")
+
+            if not isinstance(path, str):
+                continue
+
+            if not self._is_python_file(path):
+                continue
+
+            status = file_data.get("status")
+
+            if status == "added":
+                continue
+
+            try:
+                text = self.raw_content(
+                    path,
+                    base_sha,
+                )
+
+                if text is not None:
+                    result[path] = text
+                elif errors is not None:
+                    errors[f"base_file:{path}"] = (
+                        "GitHub returned no readable base content."
+                    )
+            except GitHubError as exc:
+                if errors is not None:
+                    errors[f"base_file:{path}"] = str(exc)
+
+        return result
 
     def pull_sample(
         self,
@@ -596,21 +815,7 @@ class GitHub:
         *,
         per_page: int = DEFAULT_PER_PAGE,
     ) -> list[dict[str, Any]]:
-        """
-        Fetch a sample of pull requests from the repository.
-
-        Walks the paginated /pulls?state=all endpoint sorted by creation date
-        (newest first) until ``max_count`` candidates are collected or the
-        endpoint is exhausted.  Individual PR records returned here contain
-        only summary fields (number, title, state, created_at, etc.) — they
-        do not include additions/deletions which require a separate /pulls/N
-        call.
-
-        This method intentionally performs complete pagination rather than
-        relying on a single page, matching the README claim that the tool
-        "walks the paginated pull-request endpoint rather than pretending that
-        a single 100-result search page is a 500-PR dataset."
-        """
+        """Fetch a sample of pull requests."""
         if max_count < 1:
             raise ValueError("max_count must be at least 1")
 
@@ -618,17 +823,29 @@ class GitHub:
         page = 1
 
         while len(results) < max_count:
-            page_size = min(per_page, max_count - len(results), DEFAULT_PER_PAGE)
-            path = (
-                f"/pulls?state=all&sort=created&direction=desc"
-                f"&per_page={page_size}&page={page}"
+            page_size = min(
+                per_page,
+                max_count - len(results),
+                DEFAULT_PER_PAGE,
             )
+
+            path = (
+                "/pulls?state=all&sort=created"
+                f"&direction=desc&per_page={page_size}"
+                f"&page={page}"
+            )
+
             data = self.request(path)
 
             if not isinstance(data, list) or not data:
                 break
 
-            results.extend(item for item in data if isinstance(item, dict))
+            results.extend(
+                item
+                for item in data
+                if isinstance(item, dict)
+            )
+
             page += 1
 
             if len(data) < page_size:
@@ -636,28 +853,145 @@ class GitHub:
 
         return results[:max_count]
 
-    # ------------------------------------------------------------------
-    # Combined evidence
-    # ------------------------------------------------------------------
+    def file_history(
+        self,
+        path: str,
+        base_sha: str | None,
+        *,
+        max_count: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Fetch recent commit history for one path at a PR base."""
+        if not path or not base_sha or max_count <= 0:
+            return []
+
+        page_size = min(max(int(max_count), 1), 100)
+        encoded_path = urllib.parse.quote(path, safe="/")
+        encoded_sha = urllib.parse.quote(
+            base_sha,
+            safe="",
+        )
+        data = self.request(
+            f"/commits?path={encoded_path}"
+            f"&sha={encoded_sha}&per_page={page_size}"
+        )
+
+        if not isinstance(data, list):
+            raise GitHubError(
+                f"Unexpected commit history response for {path!r}"
+            )
+
+        history: list[dict[str, Any]] = []
+        for commit in data[:page_size]:
+            if not isinstance(commit, dict):
+                continue
+
+            commit_data = commit.get("commit") or {}
+            author = commit_data.get("author") or {}
+            history.append(
+                {
+                    "sha": commit.get("sha"),
+                    "message": commit_data.get("message") or "",
+                    "author": author.get("name") or author.get("email") or "",
+                    "date": author.get("date") or "",
+                    "html_url": commit.get("html_url"),
+                }
+            )
+
+        return history
+
+    def _history_eligible_file(self, file_data: dict[str, Any]) -> bool:
+        """Return whether recent path history is useful for this changed file."""
+        filename = str(file_data.get("filename") or "").replace("\\", "/")
+        if not filename:
+            return False
+
+        status = str(file_data.get("status") or "").lower()
+        if status in {"added", "removed"}:
+            return False
+
+        if filename.startswith(
+            (
+                "Doc/",
+                "Misc/NEWS.d/",
+                "Lib/test/",
+                "Tools/test/",
+            )
+        ):
+            return False
+
+        if filename in {
+            "Parser/parser.c",
+            "Python/graminit.c",
+            "Python/graminit.h",
+        }:
+            return False
+
+        return filename.endswith(
+            (
+                ".c",
+                ".h",
+                ".cc",
+                ".cpp",
+                ".m",
+                ".py",
+                ".pyi",
+                ".pyx",
+            )
+        )
+
+    def _collect_file_histories(
+        self,
+        files: list[dict[str, Any]],
+        base_sha: str | None,
+        errors: dict[str, str],
+        *,
+        max_files: int = 20,
+        max_commits: int = 5,
+    ) -> None:
+        """Attach bounded recent history to relevant changed files."""
+        if not base_sha:
+            return
+
+        file_limit = max(int(max_files), 0)
+        commit_limit = max(int(max_commits), 0)
+
+        if file_limit == 0 or commit_limit == 0:
+            return
+
+        eligible = [
+            file_data
+            for file_data in files
+            if self._history_eligible_file(file_data)
+        ][:file_limit]
+
+        for file_data in eligible:
+            filename = str(file_data.get("filename") or "").replace("\\", "/")
+            try:
+                file_data["history"] = self.file_history(
+                    filename,
+                    base_sha,
+                    max_count=commit_limit,
+                )
+            except Exception as exc:
+                file_data["history"] = []
+                errors[f"history:{filename}"] = str(exc)
 
     def pull_request_evidence(
         self,
         number: int,
         *,
-        linked_issue_numbers: list[int] | tuple[int, ...] | set[int] | None = None,
+        linked_issue_numbers: list[int]
+        | tuple[int, ...]
+        | set[int]
+        | None = None,
     ) -> dict[str, Any]:
         """
         Collect the core evidence package for one PR.
-
-        The PR itself is required.  Secondary evidence collectors are
-        isolated so that one unavailable endpoint does not erase all
-        other evidence.  Failures are returned explicitly in ``errors``.
         """
         pr = self.pr(number)
         evidence: dict[str, Any] = {"pr": pr}
         errors: dict[str, str] = {}
 
-        # Core collectors — isolated so one failure doesn't lose others.
         for name, collector in {
             "files": lambda: self.files(number),
             "reviews": lambda: self.reviews(number),
@@ -673,7 +1007,9 @@ class GitHub:
 
         if linked_issue_numbers:
             try:
-                evidence["linked_issues"] = self.linked_issues(linked_issue_numbers)
+                evidence["linked_issues"] = self.linked_issues(
+                    linked_issue_numbers
+                )
             except Exception as exc:
                 evidence["linked_issues"] = []
                 errors["linked_issues"] = str(exc)
@@ -681,6 +1017,7 @@ class GitHub:
             evidence["linked_issues"] = []
 
         base_sha = (pr.get("base") or {}).get("sha")
+
         try:
             (
                 evidence["codeowners_path"],
@@ -691,23 +1028,54 @@ class GitHub:
             evidence["codeowners_text"] = None
             errors["codeowners"] = str(exc)
 
+        files = evidence.get("files", [])
+
+        self._collect_file_histories(
+            files,
+            base_sha,
+            errors,
+        )
+
+        try:
+            evidence["base_file_contents"] = (
+                self.base_file_contents(
+                    files,
+                    base_sha,
+                    errors,
+                )
+            )
+        except Exception as exc:
+            evidence["base_file_contents"] = {}
+            errors["base_file_contents"] = str(exc)
+
         head_sha = (pr.get("head") or {}).get("sha")
+
         if head_sha:
             try:
-                evidence["check_runs"] = self.check_runs(head_sha)
+                evidence["check_runs"] = self.check_runs(
+                    head_sha
+                )
             except Exception as exc:
-                evidence["check_runs"] = {"total_count": 0, "check_runs": []}
+                evidence["check_runs"] = {
+                    "total_count": 0,
+                    "check_runs": [],
+                }
                 errors["check_runs"] = str(exc)
 
             try:
-                evidence["statuses"] = self.statuses(head_sha)
+                evidence["statuses"] = self.statuses(
+                    head_sha
+                )
             except Exception as exc:
                 evidence["statuses"] = []
                 errors["statuses"] = str(exc)
 
             evidence["head_sha"] = head_sha
         else:
-            evidence["check_runs"] = {"total_count": 0, "check_runs": []}
+            evidence["check_runs"] = {
+                "total_count": 0,
+                "check_runs": [],
+            }
             evidence["statuses"] = []
 
         return {
@@ -715,10 +1083,6 @@ class GitHub:
             "errors": errors,
             "stats": self.stats(),
         }
-
-    # ------------------------------------------------------------------
-    # Collector statistics
-    # ------------------------------------------------------------------
 
     def stats(self) -> dict[str, Any]:
         return {

@@ -1,37 +1,4 @@
-﻿"""
-CPython PR Triager — main CLI entry point.
-
-Usage:
-    python scripts/analyze.py 123456
-    python scripts/analyze.py 123456 --ai
-    python scripts/analyze.py 123456 --json
-    python scripts/analyze.py --learn-patterns 500 --output-patterns data/patterns.json
-
-Fixes applied vs. original:
-    point 1  - pull_sample now exists in github.py; called correctly here.
-    point 2  - timeline events get "bot" key from github.py; no local workaround needed.
-    point 3  - backport regex now uses hyphens (fixed in policy.py).
-    point 5  - refcount logic fixed in analyzers.py.
-    point 6  - REMOVED all duplicate policy functions from this file.
-               file_signals, review_signals, branch_and_backport_signals,
-               process_signals, disposition now come exclusively from policy.py.
-    point 7  - REMOVED dead C_CHECKS/PY_CHECKS/SEC_CHECKS lists.
-               All checks are in analyzers.py RULES dict.
-    point 9  - API version fixed in github.py.
-    point 11 - Web UI (index.html) and Python package are now documented as
-               separate tools with a note at startup.
-    point 16 - --no-linked-issues now prints an explicit warning.
-    point 20 - ai_synthesis() REMOVED; now imports and calls ai.synthesize().
-    point 23 - sys.path manipulation retained but documented; scripts/__init__.py
-               note added in README. Users should run from repo root.
-
-Import note:
-    scripts.triager.analyzers is imported as a module object (not via "from X import Y")
-    to avoid a circular-import error when test_analyzers.py imports analyzers directly
-    while unittest is also loading analyze.py via test_triager.py.
-"""
-
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import datetime as dt
@@ -49,35 +16,47 @@ if __package__ in {None, ""}:
     if str(REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.triager.github import GitHub as TriagerGitHub
-from scripts.triager.references import (
-    collect_issue_numbers,
-    issue_refs_from_timeline as extract_timeline_issue_refs,
-    extract_references,
-)
-
 # Import analyzers as a MODULE object, not via "from X import Y".
 # This avoids a circular import when test_analyzers.py imports
 # scripts.triager.analyzers directly while unittest simultaneously
 # loads analyze.py (which would try to import from a partially
 # initialised analyzers module).
 import scripts.triager.analyzers as _analyzers_module
+from scripts.triager.ai import AISynthesisError
 
+# FIX (point 20): import AI synthesis from the module — no local duplicate.
+from scripts.triager.ai import synthesize as ai_synthesize
 from scripts.triager.codeowners import (
     parse_codeowners as parse_codeowners_rules,
+)
+from scripts.triager.codeowners import (
     resolve_codeowners as resolve_codeowners_matches,
 )
-from scripts.triager.report import build_report
+from scripts.triager.github import GitHub as TriagerGitHub
+from scripts.triager.policy import (
+    branch_and_backport_signals as policy_branch_signals,
+)
+
 # FIX (point 6): import all policy functions from policy.py — no local copies.
 from scripts.triager.policy import (
     disposition as policy_disposition,
-    process_signals as policy_process_signals,
-    file_signals as policy_file_signals,
-    review_signals as policy_review_signals,
-    branch_and_backport_signals as policy_branch_signals,
 )
-# FIX (point 20): import AI synthesis from the module — no local duplicate.
-from scripts.triager.ai import synthesize as ai_synthesize, AISynthesisError
+from scripts.triager.policy import (
+    file_signals as policy_file_signals,
+)
+from scripts.triager.policy import (
+    process_signals as policy_process_signals,
+)
+from scripts.triager.policy import (
+    review_signals as policy_review_signals,
+)
+from scripts.triager.references import (
+    collect_issue_numbers,
+)
+from scripts.triager.references import (
+    issue_refs_from_timeline as extract_timeline_issue_refs,
+)
+from scripts.triager.report import build_report
 
 REPO = os.environ.get("CPYTHON_REPO", "python/cpython")
 CACHE_DIR = Path(os.environ.get("CPYTHON_TRIAGER_CACHE", ".triager-cache"))
@@ -116,18 +95,18 @@ LABEL_HINTS = {
 MAINTENANCE_BRANCH_RE = re.compile(r"^3\.\d+$")
 
 # FIX (point 3): hyphens not spaces — matches real CPython label format.
-BACKPORT_LABEL_RE = re.compile(r"^needs-backport-to-(\d+\.\d+)$", re.I)
+BACKPORT_LABEL_RE = re.compile(r"^needs-backport-to-(\d+\.\d+)$", re.IGNORECASE)
 
 # Legacy reference syntax kept for compatibility with test_triager.py.
 LEGACY_ISSUE_REF_RE = re.compile(
     r"(?:\bgh-|#|fix(?:es|ed)?\s+#|close(?:s|d)?\s+#|resolve(?:s|d)?\s+#)(\d{3,7})",
-    re.I,
+    re.IGNORECASE,
 )
 
-PEP_RE = re.compile(r"\bpep[- ]?(\d{3,4})\b", re.I)
+PEP_RE = re.compile(r"\bpep[- ]?(\d{3,4})\b", re.IGNORECASE)
 # FIX (point 4) applied in references.py; keep legacy regex here for
 # backward-compat with the test_triager.py extract_refs test only.
-DISCUSS_RE = re.compile(r"https?://(?:www\.)?discuss\.python\.org/t/[^\s)>]+", re.I)
+DISCUSS_RE = re.compile(r"https?://(?:www\.)?discuss\.python\.org/t/[^\s)>]+", re.IGNORECASE)
 
 # FIX (point 8): expanded LAYOUT table with missing subsystems.
 LAYOUT = [
@@ -279,7 +258,7 @@ def classify(path):
 
 
 def parse_codeowners(text):
-    rules = parse_codeowners_rules(text)
+    rules = parse_codeowners_rules(text or "")
     return [
         {"line": rule.line, "pattern": rule.pattern, "owners": list(rule.owners)}
         for rule in rules
@@ -348,6 +327,7 @@ def fetch_pr_evidence(gh, number):
     """Compatibility wrapper around the modular PR evidence collector."""
     result = gh.pull_request_evidence(number)
     evidence = result["evidence"]
+
     evidence.setdefault("files", [])
     evidence.setdefault("reviews", [])
     evidence.setdefault("review_comments", [])
@@ -358,45 +338,31 @@ def fetch_pr_evidence(gh, number):
     evidence.setdefault("statuses", [])
     evidence.setdefault("codeowners_path", None)
     evidence.setdefault("codeowners_text", None)
+    evidence["evidence_errors"] = dict(result.get("errors") or {})
+
     return evidence
 
 
 def fetch_linked_issues(gh, pr_number, pr_body, timeline, limit=20):
     """
-    Discover explicitly referenced GitHub issues and fetch their evidence.
+    Discover referenced GitHub issues and fetch their evidence.
 
-    FIX (point 2): timeline events now have "bot" key set by github.py,
-    so bot filtering in collect_issue_numbers works correctly.
+    Reference extraction is delegated to references.py so textual and
+    structured timeline references use the same canonical rules.
     """
-    text = pr_body or ""
-
-    github_issue_numbers = {
-        int(m.group(1))
-        for m in re.finditer(r"\b(?:GH-|gh-)(\d{3,7})\b", text)
-    }
-    github_issue_numbers.update(
-        int(m.group(1))
-        for m in re.finditer(r"(?<!\w)#(\d{3,7})\b", text)
+    issues, peps, discussions = collect_issue_numbers(
+        pr_number=pr_number,
+        pr_body=pr_body,
+        timeline=timeline,
+        limit=limit,
     )
 
-    timeline_refs = issue_refs_from_timeline(timeline)
-    github_issue_numbers.update(
-        ref["number"]
-        for ref in timeline_refs
-        if ref["number"] != pr_number
-    )
-
-    numbers = sorted(
-        number for number in github_issue_numbers if number != pr_number
-    )[:limit]
-
-    _, peps, discussions = extract_refs(text)
-
-    if not numbers:
+    if not issues:
         return [], peps, discussions
 
     linked_issues = gh.linked_issue_evidence_batch(
-        numbers, bot_logins=BOT_LOGINS
+        issues,
+        bot_logins=BOT_LOGINS,
     )
     return linked_issues, peps, discussions
 
@@ -441,14 +407,21 @@ def ast_findings(path, added):
     return findings
 
 
-def analyze_diff(files):
-    """
-    Compatibility wrapper around the modular deterministic analyzers.
+def analyze_diff(files, base_file_contents=None):
+    """Run deterministic analysis with optional base-file reconstruction."""
+    enriched_files = []
+    base_file_contents = base_file_contents or {}
 
-    Uses the module-level import to avoid circular-import issues when
-    test_analyzers.py imports scripts.triager.analyzers directly.
-    """
-    return _analyzers_module.analyze_files(files)
+    for file_data in files:
+        enriched = dict(file_data)
+        filename = enriched.get("filename")
+        if isinstance(filename, str):
+            base_text = base_file_contents.get(filename)
+            if base_text is not None:
+                enriched["base_text"] = base_text
+        enriched_files.append(enriched)
+
+    return _analyzers_module.analyze_files(enriched_files)
 
 
 def file_signals(files):
@@ -626,32 +599,56 @@ def disposition(process, findings):
 # CI check summary
 # ---------------------------------------------------------------------------
 
-def build_checks(gh, pr):
+def build_checks(gh, pr, evidence=None):
+    """
+    Build a CI summary from the collected evidence when available.
+
+    The optional ``evidence`` argument preserves the legacy two-argument
+    API while allowing report assembly to reuse the original evidence
+    snapshot without issuing duplicate GitHub requests.
+    """
     head_sha = (pr.get("head") or {}).get("sha")
     if not head_sha:
         return {"available": False, "reason": "No PR head SHA."}
 
+    evidence = evidence if isinstance(evidence, dict) else {}
+
+    existing_check_runs = evidence.get("check_runs")
+    existing_statuses = evidence.get("statuses")
+
+    has_check_evidence = (
+        isinstance(existing_check_runs, dict)
+        and isinstance(existing_check_runs.get("check_runs"), list)
+    )
+    has_status_evidence = isinstance(existing_statuses, list)
+
     result = {
         "available": True,
         "head_sha": head_sha,
-        "check_runs": [],
-        "status": None,
+        "check_runs": (
+            existing_check_runs.get("check_runs", [])
+            if has_check_evidence
+            else []
+        ),
+        "status": existing_statuses if has_status_evidence else None,
     }
 
-    try:
-        result["check_runs"] = gh.checks(head_sha)
-    except Exception as exc:
-        result["checks_error"] = str(exc)
+    if not has_check_evidence:
+        try:
+            result["check_runs"] = gh.checks(head_sha)
+        except Exception as exc:
+            result["checks_error"] = str(exc)
 
-    try:
-        result["status"] = gh.statuses(head_sha)
-    except Exception as exc:
-        result["status_error"] = str(exc)
+    if not has_status_evidence:
+        try:
+            result["status"] = gh.statuses(head_sha)
+        except Exception as exc:
+            result["status_error"] = str(exc)
 
     conclusions = [
         item.get("conclusion")
         for item in result["check_runs"]
-        if item.get("status") == "completed"
+        if isinstance(item, dict) and item.get("status") == "completed"
     ]
 
     result["summary"] = {
@@ -659,14 +656,20 @@ def build_checks(gh, pr):
         "completed": sum(
             run.get("status") == "completed"
             for run in result["check_runs"]
+            if isinstance(run, dict)
         ),
         "failures": sum(
-            c in {"failure", "timed_out", "cancelled", "action_required"}
-            for c in conclusions
+            conclusion in {
+                "failure",
+                "timed_out",
+                "cancelled",
+                "action_required",
+            }
+            for conclusion in conclusions
         ),
         "successes": sum(
-            c in {"success", "neutral", "skipped"}
-            for c in conclusions
+            conclusion in {"success", "neutral", "skipped"}
+            for conclusion in conclusions
         ),
     }
 
@@ -683,18 +686,67 @@ def build_checks(gh, pr):
 def make_report(gh, evidence, linked_issues, experts, patterns):
     files = evidence["files"]
     timeline = evidence["timeline"]
-    labels = [item.get("name") for item in evidence["pr"].get("labels", [])]
+    labels = [
+        item.get("name")
+        for item in evidence["pr"].get("labels", [])
+    ]
 
-    findings, signatures = analyze_diff(files)
-
-    # FIX (point 6): use imported policy functions, not local copies.
-    process, backports = policy_process_signals(
-        evidence["pr"], files, timeline, labels, patterns
+    findings, signatures = analyze_diff(
+        files,
+        evidence.get("base_file_contents"),
     )
 
-    report_disposition = policy_disposition(process, findings)
+    process, backports = policy_process_signals(
+        evidence["pr"],
+        files,
+        timeline,
+        labels,
+        patterns,
+    )
 
-    checks = build_checks(gh, evidence["pr"])
+    evidence_errors = evidence.get("evidence_errors") or {}
+
+    required_evidence = (
+        "pr",
+        "files",
+        "timeline",
+        "reviews",
+        "review_comments",
+        "issue_comments",
+    )
+
+    missing_evidence = [
+        source
+        for source in required_evidence
+        if source != "pr"
+        and (
+            source in evidence_errors
+            or evidence.get(source) is None
+        )
+    ]
+
+    evidence_completeness = {
+        "attempted": list(required_evidence),
+        "available": [
+            source
+            for source in required_evidence
+            if source not in missing_evidence
+        ],
+        "missing": missing_evidence,
+        "errors": {
+            source: str(evidence_errors[source])
+            for source in evidence_errors
+            if source in required_evidence
+        },
+    }
+
+    report_disposition = policy_disposition(
+        process,
+        findings,
+        evidence_completeness,
+    )
+
+    checks = build_checks(gh, evidence["pr"], evidence)
 
     return build_report(
         repository=REPO,
@@ -852,7 +904,8 @@ def main():
         )
 
     base_sha = (pr.get("base") or {}).get("sha")
-    codeowners_path, codeowners_text = gh.codeowners(base_sha)
+    codeowners_path = evidence.get("codeowners_path")
+    codeowners_text = evidence.get("codeowners_text")
 
     rules = parse_codeowners(codeowners_text)
     experts = resolve_codeowners(
@@ -889,7 +942,14 @@ def main():
             report["ai_error"] = str(exc)
 
     if args.as_json:
-        print(json.dumps(report, indent=2, ensure_ascii=False))
+        output = json.dumps(report, indent=2, ensure_ascii=False)
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8")
+        try:
+            print(output)
+        except UnicodeEncodeError:
+            sys.stdout.buffer.write(output.encode("utf-8"))
+            sys.stdout.buffer.write(b"\n")
     else:
         print_report(report, quiet=args.quiet)
 

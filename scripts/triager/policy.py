@@ -1,54 +1,197 @@
 ﻿"""
 Deterministic policy decisions for CPython PR triage.
-
-This module contains process-signal, backport, review, and disposition
-rules. It does not perform GitHub requests or CLI presentation.
-
-Fixes applied:
-- BACKPORT_LABEL_RE now matches "needs-backport-to-X.Y" (hyphens) which
-  is the actual label format used in python/cpython (was matching spaces).
-- 3.10 security-only branch now explicitly flagged (point 14).
-- _iso_age_days moved here (was also duplicated in analyze.py).
 """
 
 from __future__ import annotations
 
 import datetime as dt
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 MAINTENANCE_BRANCH_RE = re.compile(r"^3\.\d+$")
 
-# FIX (point 3): real CPython labels use hyphens: "needs-backport-to-3.13"
-# The original regex matched spaces which never matched any real label.
+DEFAULT_BRANCH_POLICIES: dict[str, str] = {
+    "main": "feature",
+    "3.15": "prerelease",
+    "3.14": "bugfix",
+    "3.13": "bugfix",
+    "3.12": "security",
+    "3.11": "security",
+    "3.10": "security",
+    "3.9": "end-of-life",
+    "3.8": "end-of-life",
+    "3.7": "end-of-life",
+    "3.6": "end-of-life",
+    "3.5": "end-of-life",
+    "3.4": "end-of-life",
+    "3.3": "end-of-life",
+    "3.2": "end-of-life",
+    "3.1": "end-of-life",
+    "3.0": "end-of-life",
+}
+
+VALID_BRANCH_STATUSES = frozenset(
+    {
+        "feature",
+        "prerelease",
+        "bugfix",
+        "security",
+        "end-of-life",
+        "unknown",
+    }
+)
+
+SECURITY_ONLY_BRANCHES = frozenset(
+    branch
+    for branch, status in DEFAULT_BRANCH_POLICIES.items()
+    if status == "security"
+)
+
 BACKPORT_LABEL_RE = re.compile(
+    r"^needs backport to (\d+\.\d+)$",
+    re.IGNORECASE,
+)
+
+LEGACY_BACKPORT_LABEL_RE = re.compile(
     r"^needs-backport-to-(\d+\.\d+)$",
     re.IGNORECASE,
 )
 
-# FIX (point 14): 3.10 is security-fix-only.
-SECURITY_ONLY_BRANCHES = frozenset({"3.10"})
+DO_NOT_MERGE_LABEL = "DO-NOT-MERGE"
+AWAITING_ACTION_LABEL = "awaiting action"
+SKIP_NEWS_LABEL = "skip news"
+
+EVIDENCE_REVIEW_DISPOSITION = "NEEDS_EVIDENCE_REVIEW"
 
 
 def _iso_age_days(value: str | None) -> float | None:
-    """Calculate age in days from an ISO-8601 timestamp."""
     if not value:
         return None
+
     try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=dt.timezone.utc)
+
         return (
-            dt.datetime.now(dt.timezone.utc)
-            - dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+            dt.datetime.now(dt.timezone.utc) - parsed
         ).total_seconds() / 86400
-    except ValueError:
+    except (TypeError, ValueError):
         return None
+
+
+def _normalise_label(label: Any) -> str:
+    if label is None:
+        return ""
+    return str(label).strip()
+
+
+def _normalise_labels(labels: list[str]) -> list[str]:
+    return [
+        normalized
+        for label in labels
+        if (normalized := _normalise_label(label))
+    ]
+
+
+def _casefold_labels(labels: list[str]) -> dict[str, str]:
+    result: dict[str, str] = {}
+
+    for label in _normalise_labels(labels):
+        result.setdefault(label.casefold(), label)
+
+    return result
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None or value == "":
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _branch_status_from_mapping(
+    branch: str,
+    mapping: Mapping[str, Any] | None,
+) -> str | None:
+    if not mapping:
+        return None
+
+    value = mapping.get(branch)
+
+    if isinstance(value, str):
+        status = value.strip().lower()
+        return status if status in VALID_BRANCH_STATUSES else None
+
+    if isinstance(value, Mapping):
+        status = value.get("status")
+        if isinstance(status, str):
+            status = status.strip().lower()
+            return status if status in VALID_BRANCH_STATUSES else None
+
+    return None
+
+
+def _resolve_branch_status(
+    pr: dict[str, Any],
+    *,
+    branch_policies: Mapping[str, Any] | None = None,
+) -> str:
+    base = pr.get("base") or {}
+    branch = str(base.get("ref") or "").strip()
+
+    candidates = (
+        base.get("status"),
+        base.get("branch_status"),
+        pr.get("branch_status"),
+    )
+
+    for candidate in candidates:
+        if isinstance(candidate, str):
+            status = candidate.strip().lower()
+            if status in VALID_BRANCH_STATUSES:
+                return status
+
+    status = _branch_status_from_mapping(branch, branch_policies)
+    if status:
+        return status
+
+    return DEFAULT_BRANCH_POLICIES.get(branch, "unknown")
+
+
+def _is_documentation_only(names: list[str]) -> bool:
+    return bool(names) and all(name.startswith("Doc/") for name in names)
+
+
+def _is_test_only(names: list[str]) -> bool:
+    return bool(names) and all(
+        name.startswith("Lib/test/")
+        or "/test/" in name
+        or Path(name).name.startswith("test_")
+        for name in names
+    )
+
+
+def _is_news_only(names: list[str]) -> bool:
+    return bool(names) and all(
+        name.startswith("Misc/NEWS.d/")
+        for name in names
+    )
 
 
 def file_signals(
     files: list[dict[str, Any]],
 ) -> tuple[list[str], list[str], list[str], list[str]]:
-    """Classify changed files into names, tests, NEWS entries, and docs."""
-    names = [f.get("filename", "") for f in files]
+    names = [
+        str(filename)
+        for item in files
+        if isinstance(item, dict)
+        and (filename := item.get("filename"))
+    ]
 
     tests = [
         name
@@ -60,8 +203,17 @@ def file_signals(
         )
     ]
 
-    news = [name for name in names if name.startswith("Misc/NEWS.d/")]
-    docs = [name for name in names if name.startswith("Doc/")]
+    news = [
+        name
+        for name in names
+        if name.startswith("Misc/NEWS.d/")
+    ]
+
+    docs = [
+        name
+        for name in names
+        if name.startswith("Doc/")
+    ]
 
     return names, tests, news, docs
 
@@ -70,53 +222,105 @@ def review_signals(
     pr: dict[str, Any],
     timeline: list[dict[str, Any]],
 ) -> list[tuple[str, str]]:
-    """Produce deterministic signals from human review activity."""
-    human = [event for event in timeline if not event.get("bot")]
+    human = [
+        event
+        for event in timeline
+        if isinstance(event, dict) and not event.get("bot")
+    ]
 
     approvals = [
         event
         for event in human
-        if event.get("kind") == "review" and event.get("state") == "APPROVED"
+        if (
+            event.get("kind") == "review"
+            and str(event.get("state") or "").upper() == "APPROVED"
+        )
     ]
 
     changes = [
         event
         for event in human
-        if event.get("kind") == "review" and event.get("state") == "CHANGES_REQUESTED"
+        if (
+            event.get("kind") == "review"
+            and str(event.get("state") or "").upper() == "CHANGES_REQUESTED"
+        )
     ]
 
     signals: list[tuple[str, str]] = []
 
     if approvals:
         signals.append(
-            ("OK", f"{len(approvals)} human approval review(s) recorded.")
+            (
+                "OK",
+                f"{len(approvals)} human approval review(s) recorded.",
+            )
         )
 
     if changes:
-        latest = max(changes, key=lambda e: e.get("date", ""))
-        later = [e for e in human if e.get("date", "") > latest.get("date", "")]
+        latest = max(
+            changes,
+            key=lambda event: str(event.get("date") or ""),
+        )
 
-        if later:
+        latest_date = str(latest.get("date") or "")
+
+        later_human_activity = [
+            event
+            for event in human
+            if str(event.get("date") or "") > latest_date
+        ]
+
+        if later_human_activity:
             signals.append(
                 (
                     "INFO",
-                    f"Changes were requested by @{latest.get('login','?')}; "
-                    "later human activity exists.",
+                    f"Changes were requested by "
+                    f"@{latest.get('login', '?')}; later human activity "
+                    "exists, but the requested changes should still be "
+                    "verified as addressed.",
                 )
             )
         else:
             signals.append(
                 (
                     "WARN",
-                    f"Latest changes-requested review is by @{latest.get('login','?')} "
-                    "with no later human activity.",
+                    f"Latest changes-requested review is by "
+                    f"@{latest.get('login', '?')} with no later human "
+                    "activity.",
                 )
             )
 
     if pr.get("state") == "open":
-        dates = [e.get("date") for e in human if e.get("date")]
-        if dates:
-            age = _iso_age_days(max(dates))
+        dates = [
+            str(event.get("date"))
+            for event in human
+            if event.get("date")
+        ]
+
+        if not dates and pr.get("updated_at"):
+            age = _iso_age_days(str(pr["updated_at"]))
+
+            if age is not None:
+                if age > 90:
+                    signals.append(
+                        (
+                            "WARN",
+                            f"PR has not been updated for about {age:.0f} "
+                            "days; review whether follow-up is appropriate.",
+                        )
+                    )
+                elif age > 30:
+                    signals.append(
+                        (
+                            "INFO",
+                            f"PR has not been updated for about {age:.0f} "
+                            "days; follow-up may be appropriate.",
+                        )
+                    )
+        elif dates:
+            latest_date = max(dates)
+            age = _iso_age_days(latest_date)
+
             if age is not None:
                 if age > 90:
                     signals.append(
@@ -141,71 +345,204 @@ def review_signals(
 def branch_and_backport_signals(
     pr: dict[str, Any],
     labels: list[str],
+    branch_policies: Mapping[str, Any] | None = None,
+    files: list[dict[str, Any]] | None = None,
 ) -> tuple[list[tuple[str, str]], list[str]]:
-    """Produce branch-policy signals and extract requested backport targets."""
-    base = (pr.get("base") or {}).get("ref", "")
+    base = str((pr.get("base") or {}).get("ref") or "").strip()
+    normalized_labels = _normalise_labels(labels)
 
     signals: list[tuple[str, str]] = []
 
-    if MAINTENANCE_BRANCH_RE.fullmatch(base):
-        # FIX (point 14): 3.10 is security-only — reject bug fixes.
-        if base in SECURITY_ONLY_BRANCHES:
-            type_labels = set(labels) & {
-                "type-bug", "type-feature", "type-enhancement",
-                "type-crash",
-            }
-            if type_labels:
-                signals.append(
-                    (
-                        "BLOCK",
-                        f"PR targets {base} which is a security-fix-only branch. "
-                        "Only CVE-level security fixes are accepted on this branch. "
-                        "Re-target to main for bug fixes.",
-                    )
-                )
-            else:
-                signals.append(
-                    (
-                        "WARN",
-                        f"PR targets {base} (security-fix-only); verify this is "
-                        "a genuine security fix before approving.",
-                    )
-                )
-        else:
-            # Stable branch: no new features.
-            if {"type-feature", "type-enhancement"} & set(labels):
-                signals.append(
-                    (
-                        "BLOCK",
-                        f"Feature/enhancement-labelled PR targets maintenance branch {base}; "
-                        "verify CPython branch policy.",
-                    )
-                )
+    branch_status = _resolve_branch_status(
+        pr,
+        branch_policies=branch_policies,
+    )
 
-            if "type-security" in labels:
-                signals.append(
-                    (
-                        "INFO",
-                        f"Security-labelled PR targets maintenance branch {base}; "
-                        "verify security handling.",
-                    )
+    file_names = []
+    if files:
+        file_names = [
+            str(filename)
+            for item in files
+            if isinstance(item, dict)
+            and (filename := item.get("filename"))
+        ]
+    documentation_only = _is_documentation_only(file_names)
+
+    type_labels = {
+        label.casefold()
+        for label in normalized_labels
+        if label.casefold().startswith("type-")
+    }
+
+    is_feature = bool(
+        {"type-feature", "type-enhancement"} & type_labels
+    )
+    is_security = "type-security" in type_labels
+    is_bug = bool(
+        {"type-bug", "type-crash"} & type_labels
+    )
+
+    if branch_status == "feature":
+        signals.append(
+            (
+                "OK",
+                f"PR targets {base}, the feature-development branch.",
+            )
+        )
+
+    elif branch_status == "prerelease":
+        if is_feature:
+            signals.append(
+                (
+                    "BLOCK",
+                    f"Feature/enhancement-labelled PR targets {base}, "
+                    "which is in prerelease status; verify that the change "
+                    "is a permitted feature fix rather than a new feature.",
                 )
+            )
+        else:
+            signals.append(
+                (
+                    "INFO",
+                    f"PR targets {base}, which is in prerelease status; "
+                    "new features are not accepted after the first beta.",
+                )
+            )
+
+    elif branch_status == "bugfix":
+        if is_feature:
+            signals.append(
+                (
+                    "BLOCK",
+                    f"Feature/enhancement-labelled PR targets {base}, "
+                    "which is in bugfix/maintenance status; verify CPython "
+                    "branch policy and whether this change should target "
+                    "main instead.",
+                )
+            )
+        else:
+            signals.append(
+                (
+                    "OK",
+                    f"PR targets {base}, which is in bugfix/maintenance status.",
+                )
+            )
+
+        if is_security:
+            signals.append(
+                (
+                    "INFO",
+                    f"Security-labelled PR targets maintenance branch {base}; "
+                    "verify the security handling and release context.",
+                )
+            )
+
+    elif branch_status == "security":
+        if is_security:
+            signals.append(
+                (
+                    "OK",
+                    f"Security-labelled PR targets {base}, which accepts "
+                    "security fixes.",
+                )
+            )
+        elif is_feature or is_bug:
+            signals.append(
+                (
+                    "BLOCK",
+                    f"PR targets {base}, which is in security-fix-only "
+                    "status, but its current labels indicate a "
+                    f"{'feature/enhancement' if is_feature else 'bug/crash'} "
+                    "change. Verify whether this is genuinely a security "
+                    "fix before proceeding.",
+                )
+            )
+        elif documentation_only:
+            signals.append(
+                (
+                    "INFO",
+                    f"Documentation-only PR targets {base}, which is in "
+                    "security-fix-only status; no runtime change is indicated, "
+                    "but verify that this documentation backport is appropriate "
+                    "for the branch.",
+                )
+            )
+        else:
+            signals.append(
+                (
+                    "WARN",
+                    f"PR targets {base}, which is in security-fix-only "
+                    "status; verify that the change is a genuine security "
+                    "fix before approval.",
+                )
+            )
+
+    elif branch_status == "end-of-life":
+        signals.append(
+            (
+                "BLOCK",
+                f"PR targets {base}, which is an end-of-life Python branch; "
+                "the CPython Developer's Guide says no further changes are "
+                "allowed on end-of-life branches.",
+            )
+        )
+
+    elif MAINTENANCE_BRANCH_RE.fullmatch(base):
+        signals.append(
+            (
+                "WARN",
+                f"Branch {base} has no known current lifecycle status in "
+                "the supplied policy data; do not infer branch eligibility "
+                "from the branch number alone.",
+            )
+        )
+
+    elif base:
+        signals.append(
+            (
+                "INFO",
+                f"PR targets {base}; no CPython branch lifecycle status "
+                "was available.",
+            )
+        )
 
     backports: list[str] = []
-    for label in labels:
+    legacy_backports: list[str] = []
+
+    for label in normalized_labels:
         match = BACKPORT_LABEL_RE.fullmatch(label)
+
         if match:
             backports.append(match.group(1))
+            continue
+
+        legacy_match = LEGACY_BACKPORT_LABEL_RE.fullmatch(label)
+
+        if legacy_match:
+            legacy_backports.append(legacy_match.group(1))
 
     if backports:
         signals.append(
             (
                 "INFO",
-                "Backport intent labels: " + ", ".join(sorted(backports)) + ".",
+                "Backport intent labels: "
+                + ", ".join(sorted(set(backports)))
+                + ".",
             )
         )
 
-    return signals, backports
+    if legacy_backports:
+        signals.append(
+            (
+                "WARN",
+                "Legacy/non-current backport label spelling detected: "
+                + ", ".join(sorted(set(legacy_backports)))
+                + ". Current CPython labels use "
+                "\"needs backport to X.Y\".",
+            )
+        )
+
+    return signals, sorted(set(backports))
 
 
 def process_signals(
@@ -215,100 +552,318 @@ def process_signals(
     labels: list[str],
     patterns: dict[str, Any] | None,
 ) -> tuple[list[tuple[str, str]], list[str]]:
-    """Determine deterministic process signals and backport targets."""
     signals: list[tuple[str, str]] = []
 
-    title = pr.get("title") or ""
+    normalized_labels = _normalise_labels(labels)
+    labels_set = {label.casefold() for label in normalized_labels}
+
+    title = str(pr.get("title") or "").strip()
 
     if re.match(r"^gh-\d{3,7}:\s+\S", title, re.IGNORECASE):
-        signals.append(("OK", "Title uses the current gh-NNNNN issue-reference style."))
+        signals.append(
+            (
+                "OK",
+                "Title uses the expected gh-NNNNN issue-reference form.",
+            )
+        )
     elif re.match(r"^\[(?:3\.\d+|main)\]\s+\S", title):
-        signals.append(("OK", "Title looks like a branch/backport title."))
+        signals.append(
+            (
+                "INFO",
+                "Title uses a branch/backport-style prefix; verify that "
+                "the corresponding issue relationship and branch context "
+                "are correct.",
+            )
+        )
     else:
         signals.append(
             (
                 "INFO",
-                "Title does not use the common gh-/backport form; style signal only.",
+                "Title does not use the common gh-NNNNN issue-reference "
+                "form; style signal only.",
             )
         )
 
-    adds = int(pr.get("additions", 0) or 0)
-    dels = int(pr.get("deletions", 0) or 0)
-    total = adds + dels
+    additions = _safe_int(pr.get("additions"))
+    deletions = _safe_int(pr.get("deletions"))
+    total = additions + deletions
 
     stats = (patterns or {}).get("statistics") or {}
+
     p90 = stats.get("p90")
     p95 = stats.get("p95")
 
-    if p95 is not None and total > p95:
+    try:
+        p90_value = float(p90) if p90 is not None else None
+    except (TypeError, ValueError):
+        p90_value = None
+
+    try:
+        p95_value = float(p95) if p95 is not None else None
+    except (TypeError, ValueError):
+        p95_value = None
+
+    if p95_value is not None and total > p95_value:
         signals.append(
-            ("WARN", f"PR size {total} changed lines is above sampled p95 ({p95:.0f}).")
+            (
+                "WARN",
+                f"PR size {total} changed lines is above sampled "
+                f"p95 ({p95_value:.0f}); size is a review-complexity "
+                "signal, not evidence of a defect.",
+            )
         )
-    elif p90 is not None and total > p90:
+    elif p90_value is not None and total > p90_value:
         signals.append(
-            ("INFO", f"PR size {total} changed lines is above sampled p90 ({p90:.0f}).")
+            (
+                "INFO",
+                f"PR size {total} changed lines is above sampled "
+                f"p90 ({p90_value:.0f}); size is a review-complexity "
+                "signal only.",
+            )
         )
     else:
-        signals.append(
-            ("OK", f"PR size is {total} changed lines across {pr.get('changed_files')} files.")
-        )
+        changed_files = pr.get("changed_files")
+
+        if changed_files is None:
+            signals.append(
+                (
+                    "INFO",
+                    f"PR size is {total} changed lines; changed-file "
+                    "count was not available.",
+                )
+            )
+        else:
+            signals.append(
+                (
+                    "OK",
+                    f"PR size is {total} changed lines across "
+                    f"{changed_files} files.",
+                )
+            )
 
     names, tests, news, docs = file_signals(files)
-    labels_set = set(labels)
 
-    if "skip news" in labels_set:
-        signals.append(("OK", "skip news label is present."))
-    elif news:
-        signals.append(("OK", f"NEWS entry present ({len(news)} file(s))."))
-    elif all(name.startswith("Doc/") for name in names):
-        signals.append(("INFO", "Documentation-only change has no NEWS entry; usually not required."))
-    elif all(name.startswith("Lib/test/") for name in names):
-        signals.append(("INFO", "Test-only change has no NEWS entry; usually not required."))
-    else:
+    if not names:
         signals.append(
-            ("WARN", "No Misc/NEWS.d entry detected; verify whether this change requires one.")
+            (
+                "WARN",
+                "No changed files were available to evaluate NEWS/test "
+                "requirements. Treat this as missing file evidence, not "
+                "as a documentation-only or test-only change.",
+            )
+        )
+    else:
+        documentation_only = _is_documentation_only(names)
+        test_only = _is_test_only(names)
+        news_only = _is_news_only(names)
+
+        if SKIP_NEWS_LABEL.casefold() in labels_set:
+            signals.append(
+                (
+                    "OK",
+                    "skip news label is present.",
+                )
+            )
+        elif news:
+            signals.append(
+                (
+                    "OK",
+                    f"NEWS entry present ({len(news)} file(s)).",
+                )
+            )
+        elif documentation_only:
+            signals.append(
+                (
+                    "INFO",
+                    "Documentation-only change has no NEWS entry; "
+                    "CPython normally does not require NEWS for documentation.",
+                )
+            )
+        elif test_only:
+            signals.append(
+                (
+                    "INFO",
+                    "Test-only change has no NEWS entry; CPython normally "
+                    "does not require NEWS for test-only changes.",
+                )
+            )
+        elif news_only:
+            signals.append(
+                (
+                    "OK",
+                    "NEWS-only change detected.",
+                )
+            )
+        else:
+            signals.append(
+                (
+                    "WARN",
+                    "No Misc/NEWS.d entry detected; verify whether the "
+                    "change requires one under CPython's NEWS policy.",
+                )
+            )
+
+        if tests:
+            signals.append(
+                (
+                    "OK",
+                    f"Test-related file(s) changed ({len(tests)}).",
+                )
+            )
+        elif documentation_only:
+            signals.append(
+                (
+                    "INFO",
+                    "Documentation-only change has no test file; "
+                    "test coverage is likely not applicable.",
+                )
+            )
+        elif test_only:
+            signals.append(
+                (
+                    "OK",
+                    "Test-only change contains test coverage by definition.",
+                )
+            )
+        else:
+            signals.append(
+                (
+                    "WARN",
+                    "No test file changed; verify whether regression or "
+                    "behavior coverage is needed.",
+                )
+            )
+
+        if docs:
+            signals.append(
+                (
+                    "INFO",
+                    f"Documentation-related file(s) changed ({len(docs)}). "
+                    "Verify that user-facing documentation is appropriate "
+                    "for the behavioral/API impact.",
+                )
+            )
+
+    if DO_NOT_MERGE_LABEL.casefold() in labels_set:
+        signals.append(
+            (
+                "BLOCK",
+                "DO-NOT-MERGE is active.",
+            )
         )
 
-    if tests:
-        signals.append(("OK", f"Test-related file(s) changed ({len(tests)})."))
-    elif all(name.startswith("Doc/") for name in names):
-        signals.append(("INFO", "Documentation-only change has no test file; likely not applicable."))
-    else:
+    if AWAITING_ACTION_LABEL.casefold() in labels_set:
         signals.append(
-            ("WARN", "No test file changed; verify whether regression/behavior coverage is needed.")
+            (
+                "BLOCK",
+                "awaiting action indicates that action is expected "
+                "before the PR can progress.",
+            )
         )
-
-    if "DO-NOT-MERGE" in labels_set:
-        signals.append(("BLOCK", "DO-NOT-MERGE is active."))
 
     if "awaiting changes" in labels_set:
-        signals.append(("BLOCK", "awaiting changes indicates author action is expected."))
+        signals.append(
+            (
+                "WARN",
+                "Legacy project label \"awaiting changes\" is present. "
+                "Current CPython uses \"awaiting action\" for this "
+                "workflow state.",
+            )
+        )
 
     if "awaiting merge" in labels_set:
-        signals.append(("INFO", "awaiting merge is present; verify CI and current review state."))
+        signals.append(
+            (
+                "INFO",
+                "awaiting merge is present; verify current CI, review "
+                "state, and whether the PR is otherwise ready.",
+            )
+        )
 
-    branch, backports = branch_and_backport_signals(pr, labels)
+    branch_policies: Mapping[str, Any] | None = None
+
+    if patterns:
+        candidate = patterns.get("branch_policies")
+
+        if isinstance(candidate, Mapping):
+            branch_policies = candidate
+        else:
+            candidate = patterns.get("branch_status")
+
+            if isinstance(candidate, Mapping):
+                branch_policies = candidate
+
+    branch, backports = branch_and_backport_signals(
+        pr,
+        normalized_labels,
+        branch_policies=branch_policies,
+        files=files,
+    )
+
     signals.extend(branch)
     signals.extend(review_signals(pr, timeline))
 
     return signals, backports
 
 
+def _evidence_is_incomplete(evidence: Any) -> bool:
+    if evidence is None:
+        return False
+
+    if isinstance(evidence, Mapping):
+        missing = evidence.get("missing") or []
+        errors = evidence.get("errors") or []
+
+        if missing or errors:
+            return True
+
+        complete = evidence.get("complete")
+        if complete is False:
+            return True
+
+        status = str(evidence.get("status") or "").strip().lower()
+        return status in {"incomplete", "error", "failed"}
+
+    missing = getattr(evidence, "missing", None) or []
+    errors = getattr(evidence, "errors", None) or []
+
+    if missing or errors:
+        return True
+
+    complete = getattr(evidence, "complete", None)
+
+    if complete is False:
+        return True
+
+    status = str(getattr(evidence, "status", "") or "").strip().lower()
+    return status in {"incomplete", "error", "failed"}
+
+
 def disposition(
     process: list[tuple[str, str]],
     findings: list[Any],
+    evidence: Any = None,
 ) -> str:
-    """Determine the final PR disposition from deterministic signals."""
-    if any(signal == "BLOCK" for signal, _ in process):
+    if any(
+        str(signal).upper() == "BLOCK"
+        for signal, _ in process
+    ):
         return "PROCESS_BLOCKED"
 
     if any(
-        finding.severity in {"CRITICAL", "HIGH"}
+        str(getattr(finding, "severity", "")).upper()
+        in {"CRITICAL", "HIGH"}
         for finding in findings
     ):
         return "NEEDS_TECHNICAL_REVIEW"
 
-    if any(signal == "WARN" for signal, _ in process):
+    if _evidence_is_incomplete(evidence):
+        return EVIDENCE_REVIEW_DISPOSITION
+
+    if any(
+        str(signal).upper() == "WARN"
+        for signal, _ in process
+    ):
         return "NEEDS_MAINTAINER_ATTENTION"
 
     return "READY_FOR_MAINTAINER_REVIEW"

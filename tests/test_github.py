@@ -986,5 +986,228 @@ class GitHubTests(unittest.TestCase):
         )
 
 
+class HistoryIntegrationGitHubTests(unittest.TestCase):
+    class FakeGitHub(GitHub):
+        def __init__(self):
+            super().__init__(cache_ttl=0)
+            self.history_calls = []
+
+        def pr(self, number):
+            return {
+                "number": number,
+                "base": {"sha": "base-sha"},
+                "head": {"sha": "head-sha"},
+            }
+
+        def files(self, number):
+            return [
+                {
+                    "filename": "Objects/dictobject.c",
+                    "status": "modified",
+                },
+                {
+                    "filename": "Lib/foo.py",
+                    "status": "modified",
+                },
+                {
+                    "filename": "Doc/library/foo.rst",
+                    "status": "modified",
+                },
+                {
+                    "filename": "Lib/test/test_foo.py",
+                    "status": "modified",
+                },
+                {
+                    "filename": "added.py",
+                    "status": "added",
+                },
+                {
+                    "filename": "deleted.py",
+                    "status": "removed",
+                },
+            ]
+
+        def reviews(self, number):
+            return []
+
+        def review_comments(self, number):
+            return []
+
+        def issue_comments(self, number):
+            return []
+
+        def timeline(self, number):
+            return []
+
+        def codeowners(self, base_sha):
+            return None, None
+
+        def base_file_contents(self, files, base_sha, errors=None):
+            return {}
+
+        def check_runs(self, sha):
+            return {
+                "total_count": 0,
+                "check_runs": [],
+            }
+
+        def statuses(self, sha):
+            return []
+
+        def file_history(
+            self,
+            path,
+            base_sha,
+            *,
+            max_count=5,
+        ):
+            self.history_calls.append(
+                (path, base_sha, max_count)
+            )
+            return [
+                {
+                    "sha": "abc123",
+                    "message": f"history for {path}",
+                }
+            ]
+
+        def stats(self):
+            return {
+                "api_calls": self.calls,
+                "cache_hits": self.cache_hits,
+            }
+
+    def test_pull_request_evidence_attaches_history_to_eligible_files(self):
+        gh = self.FakeGitHub()
+        result = gh.pull_request_evidence(123)
+
+        files = result["evidence"]["files"]
+        files_by_name = {
+            item["filename"]: item
+            for item in files
+        }
+
+        self.assertTrue(
+            files_by_name["Objects/dictobject.c"].get("history")
+        )
+        self.assertTrue(
+            files_by_name["Lib/foo.py"].get("history")
+        )
+
+        self.assertNotIn(
+            "history",
+            files_by_name["Doc/library/foo.rst"],
+        )
+        self.assertNotIn(
+            "history",
+            files_by_name["Lib/test/test_foo.py"],
+        )
+        self.assertNotIn(
+            "history",
+            files_by_name["added.py"],
+        )
+        self.assertNotIn(
+            "history",
+            files_by_name["deleted.py"],
+        )
+
+    def test_history_uses_pr_base_sha(self):
+        gh = self.FakeGitHub()
+        gh.pull_request_evidence(123)
+
+        self.assertEqual(
+            {call[1] for call in gh.history_calls},
+            {"base-sha"},
+        )
+
+    def test_history_collection_is_bounded(self):
+        gh = self.FakeGitHub()
+        files = [
+            {
+                "filename": f"Objects/object_{index}.c",
+                "status": "modified",
+            }
+            for index in range(30)
+        ]
+        gh.files = lambda number: files
+
+        gh.pull_request_evidence(123)
+
+        self.assertEqual(
+            len(gh.history_calls),
+            20,
+        )
+        self.assertTrue(
+            all(
+                call[2] == 5
+                for call in gh.history_calls
+            )
+        )
+
+    def test_history_failure_is_partial_and_recorded(self):
+        gh = self.FakeGitHub()
+
+        def failing_history(
+            path,
+            base_sha,
+            *,
+            max_count=5,
+        ):
+            if path == "Objects/dictobject.c":
+                raise RuntimeError("history unavailable")
+            return [
+                {
+                    "sha": "abc123",
+                    "message": "ok",
+                }
+            ]
+
+        gh.file_history = failing_history
+        result = gh.pull_request_evidence(123)
+
+        files = result["evidence"]["files"]
+        target = next(
+            item
+            for item in files
+            if item["filename"] == "Objects/dictobject.c"
+        )
+
+        self.assertEqual(
+            target["history"],
+            [],
+        )
+        self.assertIn(
+            "history:Objects/dictobject.c",
+            result["errors"],
+        )
+        self.assertTrue(
+            any(
+                item.get("history")
+                for item in files
+                if item["filename"] == "Lib/foo.py"
+            )
+        )
+
+    def test_history_is_not_collected_without_base_sha(self):
+        gh = self.FakeGitHub()
+        gh.pr = lambda number: {
+            "number": number,
+            "base": {},
+            "head": {},
+        }
+
+        result = gh.pull_request_evidence(123)
+
+        self.assertEqual(
+            gh.history_calls,
+            [],
+        )
+        self.assertNotIn(
+            "history:Objects/dictobject.c",
+            result["errors"],
+        )
+
+
+
 if __name__ == "__main__":
     unittest.main()
