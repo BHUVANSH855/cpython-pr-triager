@@ -92,9 +92,20 @@ particular PR is abnormal or unsafe.
 
 ## AI synthesis
 
+No AI key is required for the deterministic report. To enable AI synthesis:
+
+**Anthropic:**
+
 ```powershell
-$env:ANTHROPIC_API_KEY="..."
+$env:ANTHROPIC_API_KEY="sk-ant-..."
 python scripts/analyze.py 123456 --ai
+```
+
+**Gemini (free tier):**
+
+```powershell
+$env:GEMINI_API_KEY="..."
+python scripts/analyze.py 123456 --ai --ai-provider gemini
 ```
 
 The deterministic report is constructed first. The model receives that evidence

@@ -1,4 +1,4 @@
-﻿"""AI provider implementations for the CPython PR triager.
+"""AI provider implementations for the CPython PR triager.
 
 Providers are intentionally small adapters. The canonical AI response
 validation remains in scripts.triager.ai.
@@ -107,7 +107,7 @@ class GeminiAIProvider:
         self.model = (
             model
             or os.environ.get("GEMINI_MODEL")
-            or "gemini-3.8-flash"
+            or "gemini-2.5-flash"
         )
 
         if timeout is None:
