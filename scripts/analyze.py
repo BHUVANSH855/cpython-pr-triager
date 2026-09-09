@@ -786,7 +786,7 @@ def print_report(report, quiet=False):
 
     print("\nProcess / Evidence Signals")
     for item in report["process_signals"]:
-        print(f"  [{item['signal']}] {item['message']}")
+        print(f"  [{item['level']}] {item['message']}")
 
     print("\nTechnical Findings")
     if report["technical_findings"]:
