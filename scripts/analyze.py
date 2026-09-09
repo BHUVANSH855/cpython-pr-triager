@@ -36,6 +36,7 @@ from scripts.triager.github import GitHub as TriagerGitHub
 from scripts.triager.policy import (
     branch_and_backport_signals as policy_branch_signals,
 )
+from scripts.triager.snapshot import ReviewSnapshot
 
 # FIX (point 6): import all policy functions from policy.py — no local copies.
 from scripts.triager.policy import (
@@ -324,23 +325,9 @@ def issue_refs_from_timeline(timeline):
 # ---------------------------------------------------------------------------
 
 def fetch_pr_evidence(gh, number):
-    """Compatibility wrapper around the modular PR evidence collector."""
-    result = gh.pull_request_evidence(number)
-    evidence = result["evidence"]
-
-    evidence.setdefault("files", [])
-    evidence.setdefault("reviews", [])
-    evidence.setdefault("review_comments", [])
-    evidence.setdefault("issue_comments", [])
-    evidence.setdefault("timeline", [])
-    evidence.setdefault("linked_issues", [])
-    evidence.setdefault("check_runs", {"total_count": 0, "check_runs": []})
-    evidence.setdefault("statuses", [])
-    evidence.setdefault("codeowners_path", None)
-    evidence.setdefault("codeowners_text", None)
-    evidence["evidence_errors"] = dict(result.get("errors") or {})
-
-    return evidence
+    """Compatibility wrapper around the canonical review snapshot."""
+    snapshot = ReviewSnapshot.collect(gh, number)
+    return snapshot.to_evidence()
 
 
 def fetch_linked_issues(gh, pr_number, pr_body, timeline, limit=20):
