@@ -107,7 +107,7 @@ class GeminiAIProvider:
         self.model = (
             model
             or os.environ.get("GEMINI_MODEL")
-            or "gemini-2.5-flash"
+            or "gemini-3.6-flash"
         )
 
         if timeout is None:
