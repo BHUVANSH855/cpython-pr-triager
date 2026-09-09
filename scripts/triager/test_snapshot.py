@@ -9,6 +9,7 @@ class FakeGitHub:
     def __init__(self, result):
         self.result = result
         self.calls = []
+        self.linked_issue_calls = []
 
     def pull_request_evidence(self, number, *, linked_issue_numbers=None):
         self.calls.append(
@@ -19,6 +20,16 @@ class FakeGitHub:
         )
         return self.result
 
+    def linked_issue_evidence_batch(self, numbers):
+        self.linked_issue_calls.append(list(numbers))
+        return [
+            {
+                "number": number,
+                "title": f"Related issue {number}",
+            }
+            for number in numbers
+        ]
+
 
 def make_result():
     return {
@@ -26,6 +37,7 @@ def make_result():
             "pr": {
                 "number": 123456,
                 "title": "Test PR",
+                "body": "Fixes #100001 and relates to PEP 9999.",
                 "base": {
                     "sha": "base-sha",
                     "repo": {
@@ -47,18 +59,19 @@ def make_result():
                 {
                     "id": 1,
                     "state": "APPROVED",
+                    "body": "This is related to #100002.",
                 }
             ],
             "review_comments": [
                 {
                     "id": 2,
-                    "body": "Looks good.",
+                    "body": "See #100003 for the previous behavior.",
                 }
             ],
             "issue_comments": [
                 {
                     "id": 3,
-                    "body": "Thanks!",
+                    "body": "Discussion: https://discuss.python.org/t/example-topic/12345",
                 }
             ],
             "timeline": [
@@ -67,12 +80,7 @@ def make_result():
                     "sha": "head-sha",
                 }
             ],
-            "linked_issues": [
-                {
-                    "number": 999999,
-                    "title": "Related issue",
-                }
-            ],
+            "linked_issues": [],
             "base_file_contents": {
                 "Python/example.c": "old source\n",
             },
@@ -124,7 +132,6 @@ def test_collect_builds_snapshot_from_existing_evidence():
     assert len(snapshot.review_comments) == 1
     assert len(snapshot.issue_comments) == 1
     assert len(snapshot.timeline) == 1
-    assert len(snapshot.linked_issues) == 1
 
     assert snapshot.base_file_contents == {
         "Python/example.c": "old source\n",
@@ -146,6 +153,62 @@ def test_collect_builds_snapshot_from_existing_evidence():
             [999999],
         )
     ]
+
+
+def test_collect_discovers_references_across_pr_discussion():
+    gh = FakeGitHub(make_result())
+
+    snapshot = ReviewSnapshot.collect(gh, 123456)
+
+    assert snapshot.references["issues"] == [
+        100001,
+        100002,
+        100003,
+    ]
+
+    assert snapshot.references["peps"] == [9999]
+
+    assert snapshot.references["discussions"] == [
+        "https://discuss.python.org/t/example-topic/12345",
+    ]
+
+
+def test_collect_fetches_discovered_linked_issues():
+    gh = FakeGitHub(make_result())
+
+    snapshot = ReviewSnapshot.collect(gh, 123456)
+
+    assert gh.linked_issue_calls == [
+        [100001, 100002, 100003],
+    ]
+
+    assert snapshot.linked_issues == [
+        {
+            "number": 100001,
+            "title": "Related issue 100001",
+        },
+        {
+            "number": 100002,
+            "title": "Related issue 100002",
+        },
+        {
+            "number": 100003,
+            "title": "Related issue 100003",
+        },
+    ]
+
+
+def test_explicit_linked_issue_numbers_skip_snapshot_refetch():
+    gh = FakeGitHub(make_result())
+
+    snapshot = ReviewSnapshot.collect(
+        gh,
+        123456,
+        linked_issue_numbers=[777777],
+    )
+
+    assert gh.linked_issue_calls == []
+    assert snapshot.linked_issues == []
 
 
 def test_snapshot_completeness_reports_collection_errors():
@@ -203,6 +266,7 @@ def test_to_evidence_preserves_report_compatible_shape():
     assert evidence["statuses"] == snapshot.statuses
     assert evidence["head_sha"] == snapshot.head_sha
     assert evidence["evidence_errors"] == snapshot.evidence_errors
+    assert evidence["references"] == snapshot.references
 
 
 def test_collect_rejects_invalid_pr_numbers():

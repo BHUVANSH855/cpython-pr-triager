@@ -986,6 +986,434 @@ class GitHubTests(unittest.TestCase):
         )
 
 
+class SourceEvidenceGitHubTests(unittest.TestCase):
+    class FakeGitHub(GitHub):
+        def __init__(self):
+            super().__init__(cache_ttl=0)
+            self.content_calls = []
+
+        def raw_content(self, path, ref=None):
+            self.content_calls.append((path, ref))
+
+            contents = {
+                ("Lib/foo.py", "base-sha"): "base python\n",
+                ("Lib/foo.py", "head-sha"): "head python\n",
+                ("Objects/foo.c", "base-sha"): "base c\n",
+                ("Objects/foo.c", "head-sha"): "head c\n",
+                ("Include/foo.h", "base-sha"): "base header\n",
+                ("Include/foo.h", "head-sha"): "head header\n",
+                ("added.py", "head-sha"): "new file\n",
+                ("deleted.py", "base-sha"): "old file\n",
+            }
+
+            return contents.get((path, ref))
+
+    def test_source_file_contents_collects_base_and_head_for_modified_files(
+        self
+    ):
+        gh = self.FakeGitHub()
+
+        files = [
+            {
+                "filename": "Lib/foo.py",
+                "status": "modified",
+            },
+            {
+                "filename": "Objects/foo.c",
+                "status": "modified",
+            },
+            {
+                "filename": "Include/foo.h",
+                "status": "modified",
+            },
+        ]
+
+        result = gh.source_file_contents(
+            files,
+            "base-sha",
+            "head-sha",
+        )
+
+        self.assertEqual(
+            result["base"],
+            {
+                "Lib/foo.py": "base python\n",
+                "Objects/foo.c": "base c\n",
+                "Include/foo.h": "base header\n",
+            },
+        )
+
+        self.assertEqual(
+            result["head"],
+            {
+                "Lib/foo.py": "head python\n",
+                "Objects/foo.c": "head c\n",
+                "Include/foo.h": "head header\n",
+            },
+        )
+
+    def test_source_file_contents_collects_only_head_for_added_files(self):
+        gh = self.FakeGitHub()
+
+        files = [
+            {
+                "filename": "added.py",
+                "status": "added",
+            },
+        ]
+
+        result = gh.source_file_contents(
+            files,
+            "base-sha",
+            "head-sha",
+        )
+
+        self.assertEqual(
+            result["base"],
+            {},
+        )
+
+        self.assertEqual(
+            result["head"],
+            {
+                "added.py": "new file\n",
+            },
+        )
+
+        self.assertNotIn(
+            ("added.py", "base-sha"),
+            gh.content_calls,
+        )
+
+    def test_source_file_contents_collects_only_base_for_removed_files(self):
+        gh = self.FakeGitHub()
+
+        files = [
+            {
+                "filename": "deleted.py",
+                "status": "removed",
+            },
+        ]
+
+        result = gh.source_file_contents(
+            files,
+            "base-sha",
+            "head-sha",
+        )
+
+        self.assertEqual(
+            result["base"],
+            {
+                "deleted.py": "old file\n",
+            },
+        )
+
+        self.assertEqual(
+            result["head"],
+            {},
+        )
+
+        self.assertNotIn(
+            ("deleted.py", "head-sha"),
+            gh.content_calls,
+        )
+
+    def test_source_file_contents_skips_unsupported_files(self):
+        gh = self.FakeGitHub()
+
+        files = [
+            {
+                "filename": "Doc/library/foo.rst",
+                "status": "modified",
+            },
+            {
+                "filename": "Misc/NEWS.d/next/Example.rst",
+                "status": "modified",
+            },
+        ]
+
+        result = gh.source_file_contents(
+            files,
+            "base-sha",
+            "head-sha",
+        )
+
+        self.assertEqual(
+            result,
+            {
+                "base": {},
+                "head": {},
+            },
+        )
+
+        self.assertEqual(
+            gh.content_calls,
+            [],
+        )
+
+    def test_source_file_contents_does_not_fetch_base_without_base_sha(
+        self
+    ):
+        gh = self.FakeGitHub()
+
+        files = [
+            {
+                "filename": "Lib/foo.py",
+                "status": "modified",
+            },
+        ]
+
+        result = gh.source_file_contents(
+            files,
+            None,
+            "head-sha",
+        )
+
+        self.assertEqual(
+            result["base"],
+            {},
+        )
+
+        self.assertEqual(
+            result["head"],
+            {
+                "Lib/foo.py": "head python\n",
+            },
+        )
+
+        self.assertNotIn(
+            ("Lib/foo.py", None),
+            gh.content_calls,
+        )
+
+    def test_source_file_contents_does_not_fetch_head_without_head_sha(
+        self
+    ):
+        gh = self.FakeGitHub()
+
+        files = [
+            {
+                "filename": "Lib/foo.py",
+                "status": "modified",
+            },
+        ]
+
+        result = gh.source_file_contents(
+            files,
+            "base-sha",
+            None,
+        )
+
+        self.assertEqual(
+            result["base"],
+            {
+                "Lib/foo.py": "base python\n",
+            },
+        )
+
+        self.assertEqual(
+            result["head"],
+            {},
+        )
+
+        self.assertNotIn(
+            ("Lib/foo.py", None),
+            gh.content_calls,
+        )
+
+    def test_source_file_contents_records_retrieval_failures(self):
+        gh = self.FakeGitHub()
+
+        def failing_raw_content(path, ref=None):
+            if path == "Objects/foo.c" and ref == "base-sha":
+                raise GitHubError("base content unavailable")
+
+            return "content\n"
+
+        gh.raw_content = failing_raw_content
+
+        errors = {}
+
+        result = gh.source_file_contents(
+            [
+                {
+                    "filename": "Objects/foo.c",
+                    "status": "modified",
+                },
+            ],
+            "base-sha",
+            "head-sha",
+            errors,
+        )
+
+        self.assertEqual(
+            result["base"],
+            {},
+        )
+
+        self.assertEqual(
+            result["head"],
+            {
+                "Objects/foo.c": "content\n",
+            },
+        )
+
+        self.assertIn(
+            "base_file:Objects/foo.c",
+            errors,
+        )
+
+        self.assertEqual(
+            errors["base_file:Objects/foo.c"],
+            "base content unavailable",
+        )
+
+
+class SourceEvidenceIntegrationGitHubTests(unittest.TestCase):
+    class FakeGitHub(GitHub):
+        def __init__(self):
+            super().__init__(cache_ttl=0)
+            self.source_calls = []
+
+        def pr(self, number):
+            return {
+                "number": number,
+                "base": {"sha": "base-sha"},
+                "head": {"sha": "head-sha"},
+            }
+
+        def files(self, number):
+            return [
+                {
+                    "filename": "Lib/foo.py",
+                    "status": "modified",
+                },
+                {
+                    "filename": "Objects/foo.c",
+                    "status": "modified",
+                },
+                {
+                    "filename": "added.py",
+                    "status": "added",
+                },
+                {
+                    "filename": "deleted.py",
+                    "status": "removed",
+                },
+            ]
+
+        def reviews(self, number):
+            return []
+
+        def review_comments(self, number):
+            return []
+
+        def issue_comments(self, number):
+            return []
+
+        def timeline(self, number):
+            return []
+
+        def codeowners(self, base_sha):
+            return None, None
+
+        def source_file_contents(
+            self,
+            files,
+            base_sha,
+            head_sha,
+            errors=None,
+        ):
+            self.source_calls.append(
+                (files, base_sha, head_sha)
+            )
+            return {
+                "base": {
+                    "Lib/foo.py": "base python\n",
+                    "Objects/foo.c": "base c\n",
+                    "deleted.py": "old file\n",
+                },
+                "head": {
+                    "Lib/foo.py": "head python\n",
+                    "Objects/foo.c": "head c\n",
+                    "added.py": "new file\n",
+                },
+            }
+
+        def base_file_contents(
+            self,
+            files,
+            base_sha,
+            errors=None,
+        ):
+            return {
+                "Lib/foo.py": "base python\n",
+            }
+
+        def check_runs(self, sha):
+            return {
+                "total_count": 0,
+                "check_runs": [],
+            }
+
+        def statuses(self, sha):
+            return []
+
+        def _collect_file_histories(
+            self,
+            files,
+            base_sha,
+            errors,
+        ):
+            return
+
+        def stats(self):
+            return {
+                "api_calls": self.calls,
+                "cache_hits": self.cache_hits,
+            }
+
+    def test_pull_request_evidence_includes_source_file_contents(self):
+        gh = self.FakeGitHub()
+
+        result = gh.pull_request_evidence(123)
+
+        self.assertEqual(
+            result["evidence"]["source_file_contents"],
+            {
+                "base": {
+                    "Lib/foo.py": "base python\n",
+                    "Objects/foo.c": "base c\n",
+                    "deleted.py": "old file\n",
+                },
+                "head": {
+                    "Lib/foo.py": "head python\n",
+                    "Objects/foo.c": "head c\n",
+                    "added.py": "new file\n",
+                },
+            },
+        )
+
+        self.assertEqual(
+            gh.source_calls[0][1:],
+            ("base-sha", "head-sha"),
+        )
+
+    def test_pull_request_evidence_preserves_base_file_contents(
+        self,
+    ):
+        gh = self.FakeGitHub()
+
+        result = gh.pull_request_evidence(123)
+
+        self.assertEqual(
+            result["evidence"]["base_file_contents"],
+            {
+                "Lib/foo.py": "base python\n",
+            },
+        )
+
+
 class HistoryIntegrationGitHubTests(unittest.TestCase):
     class FakeGitHub(GitHub):
         def __init__(self):

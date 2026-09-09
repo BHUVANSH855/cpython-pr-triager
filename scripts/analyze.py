@@ -36,7 +36,6 @@ from scripts.triager.github import GitHub as TriagerGitHub
 from scripts.triager.policy import (
     branch_and_backport_signals as policy_branch_signals,
 )
-from scripts.triager.snapshot import ReviewSnapshot
 
 # FIX (point 6): import all policy functions from policy.py — no local copies.
 from scripts.triager.policy import (
@@ -58,6 +57,7 @@ from scripts.triager.references import (
     issue_refs_from_timeline as extract_timeline_issue_refs,
 )
 from scripts.triager.report import build_report
+from scripts.triager.snapshot import ReviewSnapshot
 
 REPO = os.environ.get("CPYTHON_REPO", "python/cpython")
 CACHE_DIR = Path(os.environ.get("CPYTHON_TRIAGER_CACHE", ".triager-cache"))

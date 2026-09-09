@@ -1,5 +1,4 @@
-"""
-Review snapshot orchestration for CPython pull-request triage.
+"""Review snapshot orchestration for CPython pull-request triage.
 
 This module coordinates the existing GitHub evidence collectors into one
 review snapshot. It deliberately does not perform semantic analysis or AI
@@ -11,6 +10,50 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
+
+
+def _list_value(mapping: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    """Return a list-valued evidence field without exposing mutable input."""
+    value = mapping.get(key)
+    if not isinstance(value, list):
+        return []
+    return list(value)
+
+
+def _dict_value(mapping: dict[str, Any], key: str) -> dict[str, Any]:
+    """Return a dictionary-valued evidence field without exposing input."""
+    value = mapping.get(key)
+    if not isinstance(value, dict):
+        return {}
+    return dict(value)
+
+
+def _optional_string(value: Any) -> str | None:
+    """Normalize an optional string value."""
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
+def _check_runs_value(value: Any) -> dict[str, Any]:
+    """Normalize the check-runs evidence structure."""
+    if not isinstance(value, dict):
+        return {
+            "total_count": 0,
+            "check_runs": [],
+        }
+
+    result = dict(value)
+
+    check_runs = result.get("check_runs")
+    if not isinstance(check_runs, list):
+        result["check_runs"] = []
+
+    total_count = result.get("total_count")
+    if not isinstance(total_count, int):
+        result["total_count"] = len(result["check_runs"])
+
+    return result
 
 
 @dataclass
@@ -62,14 +105,14 @@ class ReviewSnapshot:
         gh: Any,
         number: int,
         *,
-        linked_issue_numbers: list[int] | tuple[int, ...] | set[int] | None = None,
-    ) -> "ReviewSnapshot":
-        """
-        Collect the existing GitHub evidence for one PR.
+        linked_issue_numbers: (
+            list[int] | tuple[int, ...] | set[int] | None
+        ) = None,
+    ) -> ReviewSnapshot:
+        """Collect one complete PR review snapshot.
 
-        This is intentionally a thin orchestration layer. The GitHub client
-        remains responsible for network access and individual evidence
-        collectors.
+        Existing GitHub collection remains responsible for network access.
+        This layer owns orchestration and reference discovery.
         """
         if not isinstance(number, int) or number <= 0:
             raise ValueError("number must be a positive integer")
@@ -93,6 +136,34 @@ class ReviewSnapshot:
         base = pr.get("base") or {}
         head = pr.get("head") or {}
 
+        files = _list_value(evidence, "files")
+        reviews = _list_value(evidence, "reviews")
+        review_comments = _list_value(evidence, "review_comments")
+        issue_comments = _list_value(evidence, "issue_comments")
+        timeline = _list_value(evidence, "timeline")
+
+        references = cls._discover_references(
+            number,
+            pr,
+            reviews,
+            review_comments,
+            issue_comments,
+            timeline,
+        )
+
+        linked_issues = _list_value(evidence, "linked_issues")
+
+        # If the caller did not explicitly provide issue identifiers, the
+        # snapshot owns discovery and fetches the discovered issue evidence.
+        if linked_issue_numbers is None and references["issues"]:
+            try:
+                linked_issues = gh.linked_issue_evidence_batch(
+                    references["issues"],
+                )
+            except Exception as exc:
+                linked_issues = []
+                result.setdefault("errors", {})["linked_issues"] = str(exc)
+
         repository = cls._repository_name(gh, pr)
 
         return cls(
@@ -100,27 +171,29 @@ class ReviewSnapshot:
             captured_at=datetime.now(timezone.utc).isoformat(),
             repository=repository,
             pr=pr,
-            files=_list_value(evidence, "files"),
-            reviews=_list_value(evidence, "reviews"),
-            review_comments=_list_value(evidence, "review_comments"),
-            issue_comments=_list_value(evidence, "issue_comments"),
-            timeline=_list_value(evidence, "timeline"),
-            linked_issues=_list_value(evidence, "linked_issues"),
+            files=files,
+            reviews=reviews,
+            review_comments=review_comments,
+            issue_comments=issue_comments,
+            timeline=timeline,
+            linked_issues=linked_issues,
             base_file_contents=_dict_value(
                 evidence,
                 "base_file_contents",
             ),
             codeowners_path=_optional_string(
-                evidence.get("codeowners_path")
+                evidence.get("codeowners_path"),
             ),
             codeowners_text=_optional_string(
-                evidence.get("codeowners_text")
+                evidence.get("codeowners_text"),
             ),
-            check_runs=_check_runs_value(evidence.get("check_runs")),
+            check_runs=_check_runs_value(
+                evidence.get("check_runs"),
+            ),
             statuses=_list_value(evidence, "statuses"),
             base_sha=_optional_string(base.get("sha")),
             head_sha=_optional_string(
-                evidence.get("head_sha") or head.get("sha")
+                evidence.get("head_sha") or head.get("sha"),
             ),
             evidence_errors={
                 str(key): str(value)
@@ -130,11 +203,56 @@ class ReviewSnapshot:
                 str(key): value
                 for key, value in (result.get("stats") or {}).items()
             },
+            references=references,
         )
 
     @staticmethod
-    def _repository_name(gh: Any, pr: dict[str, Any]) -> str:
-        """Resolve the repository name without making another API request."""
+    def _discover_references(
+        pr_number: int,
+        pr: dict[str, Any],
+        reviews: list[dict[str, Any]],
+        review_comments: list[dict[str, Any]],
+        issue_comments: list[dict[str, Any]],
+        timeline: list[dict[str, Any]],
+    ) -> dict[str, list[Any]]:
+        """Discover references across the complete PR discussion surface."""
+        from scripts.triager.references import (
+            collect_issue_numbers,
+        )
+
+        title = pr.get("title") or ""
+        body = pr.get("body") or ""
+
+        text_parts = [f"{title}\n{body}"]
+
+        for collection in (
+            reviews,
+            review_comments,
+            issue_comments,
+        ):
+            for item in collection:
+                body_text = item.get("body")
+                if isinstance(body_text, str) and body_text:
+                    text_parts.append(body_text)
+
+        issues, peps, discussions = collect_issue_numbers(
+            pr_number=pr_number,
+            pr_body="\n".join(text_parts),
+            timeline=timeline,
+        )
+
+        return {
+            "issues": issues,
+            "peps": peps,
+            "discussions": discussions,
+        }
+
+    @staticmethod
+    def _repository_name(
+        gh: Any,
+        pr: dict[str, Any],
+    ) -> str:
+        """Resolve the repository name without another API request."""
         repository = getattr(gh, "repo", None)
 
         if isinstance(repository, str) and repository:
@@ -162,13 +280,14 @@ class ReviewSnapshot:
             "check_runs",
             "statuses",
         }
+
         return not any(
             key in self.evidence_errors
             for key in required
         )
 
     def completeness(self) -> dict[str, Any]:
-        """Return a simple machine-readable evidence completeness summary."""
+        """Return a machine-readable evidence completeness summary."""
         attempted = [
             "pr",
             "files",
@@ -221,16 +340,13 @@ class ReviewSnapshot:
             return not isinstance(self.check_runs, dict)
 
         if source == "base_file_contents":
-            # An empty mapping is not automatically an error. A PR may only
-            # contain newly added files, or no source files requiring base
-            # retrieval.
             return False
 
         value = getattr(self, source, None)
         return value is None
 
     def to_evidence(self) -> dict[str, Any]:
-        """Return the snapshot in the existing report-compatible shape."""
+        """Return the existing report-compatible evidence shape."""
         return {
             "pr": self.pr,
             "files": list(self.files),
@@ -246,57 +362,8 @@ class ReviewSnapshot:
             "statuses": list(self.statuses),
             "head_sha": self.head_sha,
             "evidence_errors": dict(self.evidence_errors),
+            "references": {
+                key: list(value)
+                for key, value in self.references.items()
+            },
         }
-
-
-def _list_value(data: dict[str, Any], key: str) -> list[dict[str, Any]]:
-    """Return a defensive list copy for an evidence collection."""
-    value = data.get(key)
-    if not isinstance(value, list):
-        return []
-
-    return [
-        item
-        for item in value
-        if isinstance(item, dict)
-    ]
-
-
-def _dict_value(data: dict[str, Any], key: str) -> dict[str, str]:
-    """Return a defensive string mapping for dictionary evidence."""
-    value = data.get(key)
-    if not isinstance(value, dict):
-        return {}
-
-    return {
-        str(name): text
-        for name, text in value.items()
-        if isinstance(text, str)
-    }
-
-
-def _optional_string(value: Any) -> str | None:
-    """Normalize an optional string value."""
-    return value if isinstance(value, str) and value else None
-
-
-def _check_runs_value(value: Any) -> dict[str, Any]:
-    """Normalize check-run evidence without discarding its payload."""
-    if not isinstance(value, dict):
-        return {
-            "total_count": 0,
-            "check_runs": [],
-        }
-
-    check_runs = value.get("check_runs")
-    if not isinstance(check_runs, list):
-        check_runs = []
-
-    return {
-        **value,
-        "check_runs": [
-            item
-            for item in check_runs
-            if isinstance(item, dict)
-        ],
-    }

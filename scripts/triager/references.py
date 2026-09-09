@@ -29,6 +29,10 @@ GH_REF_RE = re.compile(
     re.IGNORECASE,
 )
 
+BARE_GITHUB_ISSUE_RE = re.compile(
+    r"(?<![\w-])#(\d{3,7})\b",
+)
+
 CLOSES_REF_RE = re.compile(
     r"(?:fix(?:es|ed)?|close(?:s|d)?|resolve(?:s|d)?)\s+#(\d{3,7})\b",
     re.IGNORECASE,
@@ -62,6 +66,7 @@ def extract_references(
         ISSUE_REF_RE,
         GITHUB_ISSUE_RE,
         GH_REF_RE,
+        BARE_GITHUB_ISSUE_RE,
         CLOSES_REF_RE,
     ):
         for match in pattern.finditer(text):

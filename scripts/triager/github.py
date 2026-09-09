@@ -760,6 +760,88 @@ class GitHub:
             or path.endswith(".pyx")
         )
 
+    @staticmethod
+    def _is_source_file(path: str) -> bool:
+        """Return whether a changed file is source-like review evidence."""
+        source_extensions = (
+            ".c",
+            ".cc",
+            ".cpp",
+            ".cxx",
+            ".h",
+            ".hh",
+            ".hpp",
+            ".hxx",
+            ".py",
+            ".pyi",
+            ".pyx",
+        )
+
+        return path.endswith(source_extensions)
+
+    def source_file_contents(
+        self,
+        files: list[dict[str, Any]],
+        base_sha: str | None,
+        head_sha: str | None,
+        errors: dict[str, str] | None = None,
+    ) -> dict[str, dict[str, str]]:
+        """
+        Fetch source versions for the files changed by a pull request.
+
+        Modified files are fetched at both the PR base and head.
+        Added files are fetched only at the head.
+        Removed files are fetched only at the base.
+
+        Unsupported files are intentionally skipped. Retrieval failures
+        are recorded when an error mapping is supplied.
+        """
+        result: dict[str, dict[str, str]] = {
+            "base": {},
+            "head": {},
+        }
+
+        for file_data in files:
+            path = file_data.get("filename")
+
+            if not isinstance(path, str):
+                continue
+
+            if not self._is_source_file(path):
+                continue
+
+            status = file_data.get("status")
+
+            refs: list[tuple[str, str | None]] = []
+
+            if status == "added":
+                refs.append(("head", head_sha))
+            elif status == "removed":
+                refs.append(("base", base_sha))
+            else:
+                refs.append(("base", base_sha))
+                refs.append(("head", head_sha))
+
+            for side, ref in refs:
+                if not ref:
+                    continue
+
+                try:
+                    text = self.raw_content(path, ref)
+
+                    if text is not None:
+                        result[side][path] = text
+                    elif errors is not None:
+                        errors[f"{side}_file:{path}"] = (
+                            "GitHub returned no readable "
+                            f"{side} content."
+                        )
+                except GitHubError as exc:
+                    if errors is not None:
+                        errors[f"{side}_file:{path}"] = str(exc)
+
+        return result
+
     def base_file_contents(
         self,
         files: list[dict[str, Any]],
@@ -1035,6 +1117,22 @@ class GitHub:
             base_sha,
             errors,
         )
+
+        try:
+            evidence["source_file_contents"] = (
+                self.source_file_contents(
+                    files,
+                    base_sha,
+                    (pr.get("head") or {}).get("sha"),
+                    errors,
+                )
+            )
+        except Exception as exc:
+            evidence["source_file_contents"] = {
+                "base": {},
+                "head": {},
+            }
+            errors["source_file_contents"] = str(exc)
 
         try:
             evidence["base_file_contents"] = (
