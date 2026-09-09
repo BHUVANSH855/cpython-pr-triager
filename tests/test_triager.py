@@ -4,11 +4,14 @@ Tests for scripts/analyze.py orchestration layer.
 
 from __future__ import annotations
 
+import io
 import json
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -294,6 +297,171 @@ Python/* @python-team
             "Modules/socketmodule.c"
         )
         self.assertEqual(subsystem, "modules/socket")
+
+    def test_ai_does_not_receive_anthropic_api_key_for_gemini(self):
+        original_argv = sys.argv
+        sys.argv = [
+            "analyze.py",
+            "1",
+            "--ai",
+            "--ai-provider",
+            "gemini",
+        ]
+
+        evidence = {
+            "pr": {
+                "base": {
+                    "sha": "base-sha",
+                    "ref": "main",
+                },
+                "title": "Test PR",
+                "body": "",
+            },
+            "timeline": [],
+            "files": [],
+            "codeowners_path": None,
+            "codeowners_text": "",
+        }
+
+        captured = {}
+
+        def fake_synthesize(report, **kwargs):
+            captured["kwargs"] = kwargs
+            return {
+                "triage": "READY_FOR_MAINTAINER_REVIEW",
+                "confidence": 4,
+                "summary": "Gemini test response",
+                "top_risks": [],
+                "review_questions": [],
+                "expert_routing": [],
+                "process_assessment": "OK",
+                "test_assessment": "OK",
+                "backport_assessment": "OK",
+                "uncertainties": [],
+            }
+
+        try:
+            with patch.object(triager, "fetch_pr_evidence", return_value=evidence):
+                with patch.object(
+                    triager,
+                    "fetch_linked_issues",
+                    return_value=([], [], []),
+                ):
+                    with patch.object(
+                        triager,
+                        "make_report",
+                        return_value={
+                            "triage": "READY_FOR_MAINTAINER_REVIEW",
+                            "findings": [],
+                        },
+                    ):
+                        with patch.object(
+                            triager,
+                            "parse_codeowners",
+                            return_value=[],
+                        ):
+                            with patch.object(
+                                triager,
+                                "resolve_codeowners",
+                                return_value=[],
+                            ):
+                                with patch.object(
+                                    triager,
+                                    "ai_synthesize",
+                                    side_effect=fake_synthesize,
+                                ):
+                                    with patch.object(
+                                        triager,
+                                        "print_report",
+                                    ):
+                                        with patch.dict(
+                                            triager.os.environ,
+                                            {
+                                                "ANTHROPIC_API_KEY": "anthropic-secret",
+                                                "GEMINI_API_KEY": "gemini-secret",
+                                            },
+                                            clear=False,
+                                        ):
+                                            triager.main()
+        finally:
+            sys.argv = original_argv
+
+        self.assertEqual(captured["kwargs"], {"provider": "gemini"})
+
+    def test_ai_error_is_displayed_in_normal_output(self):
+        original_argv = sys.argv
+        sys.argv = [
+            "analyze.py",
+            "1",
+            "--ai",
+            "--ai-provider",
+            "gemini",
+        ]
+
+        evidence = {
+            "pr": {
+                "base": {
+                    "sha": "base-sha",
+                    "ref": "main",
+                },
+                "title": "Test PR",
+                "body": "",
+            },
+            "timeline": [],
+            "files": [],
+            "codeowners_path": None,
+            "codeowners_text": "",
+        }
+
+        try:
+            with patch.object(triager, "fetch_pr_evidence", return_value=evidence):
+                with patch.object(
+                    triager,
+                    "fetch_linked_issues",
+                    return_value=([], [], []),
+                ):
+                    with patch.object(
+                        triager,
+                        "make_report",
+                        return_value={
+                            "triage": "READY_FOR_MAINTAINER_REVIEW",
+                            "findings": [],
+                        },
+                    ):
+                        with patch.object(
+                            triager,
+                            "parse_codeowners",
+                            return_value=[],
+                        ):
+                            with patch.object(
+                                triager,
+                                "resolve_codeowners",
+                                return_value=[],
+                            ):
+                                with patch.object(
+                                    triager,
+                                    "ai_synthesize",
+                                    side_effect=triager.AISynthesisError(
+                                        "Gemini API returned HTTP 503: unavailable"
+                                    ),
+                                ):
+                                    with patch.object(
+                                        triager,
+                                        "print_report",
+                                    ):
+                                        output = io.StringIO()
+                                        with redirect_stdout(output):
+                                            triager.main()
+        finally:
+            sys.argv = original_argv
+
+        rendered = output.getvalue()
+
+        self.assertIn("AI synthesis: unavailable", rendered)
+        self.assertIn(
+            "Reason: Gemini API returned HTTP 503: unavailable",
+            rendered,
+        )
 
 
 class RulesCompletenessTests(unittest.TestCase):

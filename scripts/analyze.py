@@ -842,6 +842,15 @@ def main():
     )
     parser.add_argument("pr_number", nargs="?", type=int)
     parser.add_argument("--ai", action="store_true")
+    parser.add_argument(
+        "--ai-provider",
+        choices=("anthropic", "gemini", "mock"),
+        default=os.environ.get("AI_PROVIDER", "anthropic"),
+        help=(
+            "AI provider to use when --ai is enabled "
+            "(default: AI_PROVIDER or anthropic)"
+        ),
+    )
     parser.add_argument("--json", action="store_true", dest="as_json")
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--patterns", help="Historical statistics JSON")
@@ -936,7 +945,7 @@ def main():
         try:
             report["ai_synthesis"] = ai_synthesize(
                 report,
-                api_key=ANTHROPIC_API_KEY or None,
+                provider=args.ai_provider,
             )
         except AISynthesisError as exc:
             report["ai_error"] = str(exc)
@@ -962,6 +971,9 @@ def main():
             print(ai.get("summary", ""))
             for question in ai.get("review_questions", []):
                 print(f"  - {question}")
+        elif report.get("ai_error"):
+            print("\nAI synthesis: unavailable")
+            print(f"Reason: {report['ai_error']}")
 
 
 if __name__ == "__main__":
