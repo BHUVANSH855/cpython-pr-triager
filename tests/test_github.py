@@ -1473,6 +1473,9 @@ class HistoryIntegrationGitHubTests(unittest.TestCase):
         def base_file_contents(self, files, base_sha, errors=None):
             return {}
 
+        def source_file_contents(self, files, base_sha, errors=None):
+            return {}
+
         def check_runs(self, sha):
             return {
                 "total_count": 0,

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import datetime as dt
@@ -57,6 +57,7 @@ from scripts.triager.references import (
     issue_refs_from_timeline as extract_timeline_issue_refs,
 )
 from scripts.triager.report import build_report
+from scripts.triager.reviewer_activity import ReviewerActivityCache
 from scripts.triager.snapshot import ReviewSnapshot
 
 REPO = os.environ.get("CPYTHON_REPO", "python/cpython")
@@ -670,7 +671,7 @@ def build_checks(gh, pr, evidence=None):
 # Report assembly
 # ---------------------------------------------------------------------------
 
-def make_report(gh, evidence, linked_issues, experts, patterns):
+def make_report(gh, evidence, linked_issues, experts, patterns, reviewer_activity_cache=None):
     files = evidence["files"]
     timeline = evidence["timeline"]
     labels = [
@@ -751,6 +752,7 @@ def make_report(gh, evidence, linked_issues, experts, patterns):
         summarize_labels=summarize_labels,
         label_metadata=label_metadata,
         gh=gh,
+        reviewer_activity_cache=reviewer_activity_cache,
     )
 
 
@@ -791,10 +793,36 @@ def print_report(report, quiet=False):
     else:
         print("  No heuristic findings triggered.")
 
-    if report["experts"]:
-        print("\nCODEOWNERS Routing")
-        for expert in report["experts"]:
-            print(f"  {expert['owner']} <- {expert['file']} ({expert['pattern']})")
+    expert_contexts = report.get("expert_contexts") or []
+    experts_plain = report.get("experts") or []
+    if expert_contexts or experts_plain:
+        print("\nCODEOWNERS Routing & Reviewer Profiles")
+        display = expert_contexts if expert_contexts else experts_plain
+        for expert in display:
+            owner = expert.get("owner", "?")
+            file_ = expert.get("file", "?")
+            pattern = expert.get("pattern", "?")
+            subsystems = expert.get("subsystems") or []
+            sub_str = f" [{', '.join(subsystems[:3])}]" if subsystems else ""
+            print(f"  {owner} <- {file_} ({pattern}){sub_str}")
+            # Known concerns from static profile
+            concerns = (expert.get("known_concerns") or [])[:3]
+            for concern in concerns:
+                print(f"    ↳ {concern}")
+            # Co-owners suggestion
+            co = expert.get("co_owners") or []
+            if co:
+                print(f"    Co-owners: {', '.join('@' + c for c in co[:4])}")
+            # Dynamic activity
+            rate = expert.get("approval_rate")
+            resp = expert.get("typical_response_days")
+            if rate is not None or resp is not None:
+                parts = []
+                if rate is not None:
+                    parts.append(f"approval rate {rate:.0%}")
+                if resp is not None:
+                    parts.append(f"~{resp:.0f}d response")
+                print(f"    Activity: {' | '.join(parts)}")
 
     checks = report.get("checks", {})
     if checks.get("available"):
@@ -918,7 +946,10 @@ def main():
         except Exception as exc:
             print(f"Warning: unable to read patterns: {exc}", file=sys.stderr)
 
-    report = make_report(gh, evidence, linked, experts, patterns)
+    # Build reviewer activity cache — fetches from GitHub, falls back gracefully
+    reviewer_activity_cache = ReviewerActivityCache(gh)
+
+    report = make_report(gh, evidence, linked, experts, patterns, reviewer_activity_cache)
 
     report["references"] = {"peps": peps, "discussions": discussions}
     report["repository_metadata"] = {
