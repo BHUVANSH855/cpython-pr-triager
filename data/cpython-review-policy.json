@@ -1,0 +1,88 @@
+{
+  "schema_version": 2,
+  "sources": [
+    {
+      "name": "triaging",
+      "url": "https://devguide.python.org/triage/triaging/"
+    },
+    {
+      "name": "pull_request_lifecycle",
+      "url": "https://devguide.python.org/getting-started/pull-request-lifecycle/index.html"
+    },
+    {
+      "name": "documentation",
+      "url": "https://devguide.python.org/documenting/"
+    },
+    {
+      "name": "cpython_patchcheck",
+      "url": "https://github.com/python/cpython/blob/main/Tools/patchcheck/patchcheck.py"
+    },
+    {
+      "name": "cpython_doc_readme",
+      "url": "https://github.com/python/cpython/blob/main/Doc/README.rst"
+    }
+  ],
+  "retrieved_at": "2026-09-10T10:29:38Z",
+  "checks": {
+    "solution_quality": {
+      "kind": "review_check",
+      "required": true,
+      "source": "triaging"
+    },
+    "style": {
+      "kind": "review_check",
+      "required": true,
+      "source": "triaging"
+    },
+    "tests": {
+      "kind": "review_check",
+      "required": true,
+      "source": "triaging"
+    },
+    "documentation": {
+      "kind": "review_check",
+      "required": true,
+      "source": "triaging"
+    },
+    "news": {
+      "kind": "review_check",
+      "required_when_applicable": true,
+      "source": "triaging"
+    },
+    "ci": {
+      "kind": "review_check",
+      "required": true,
+      "source": "triaging"
+    },
+    "base_branch_conflicts": {
+      "kind": "review_check",
+      "required": true,
+      "source": "triaging"
+    },
+    "patchcheck": {
+      "kind": "repository_check",
+      "enabled": true,
+      "source": "pull_request_lifecycle"
+    },
+    "documentation_build": {
+      "kind": "repository_check",
+      "enabled": true,
+      "source": "cpython_doc_readme"
+    },
+    "documentation_linkcheck": {
+      "kind": "repository_check",
+      "enabled": true,
+      "source": "cpython_doc_readme"
+    },
+    "documentation_changes": {
+      "kind": "repository_check",
+      "enabled": true,
+      "source": "cpython_doc_readme"
+    },
+    "documentation_markup_check": {
+      "kind": "repository_check",
+      "enabled": true,
+      "source": "cpython_doc_readme"
+    }
+  }
+}

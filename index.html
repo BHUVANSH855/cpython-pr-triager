@@ -6,7 +6,7 @@
 <title>CPython Deep Triager v5</title>
 <style>
 :root{
-  --bg:#f4f4f2;--surf:#fff;--s1:#f7f7f5;--s2:#f0f0ee;--s3:#e8e8e6;
+  --bg:#f4f4f2;--surf:#fff;--s1:#f7f7f5;--s2:#c0c038;--s3:#e8e8e6;
   --bd:rgba(0,0,0,.08);--bd2:rgba(0,0,0,.14);--bd3:rgba(0,0,0,.2);
   --tx:#181816;--tx2:#565650;--tx3:#96968e;
   --ac:#1a56db;--abg:#eff4ff;--at:#1a4fb5;
@@ -279,165 +279,192 @@ code{font-family:var(--mn);font-size:12px;background:var(--s2);padding:1px 5px;b
 // ═══════════════════════════════════════════════════════════════════════════
 // CODEOWNERS EXPERT MAP — from actual .github/CODEOWNERS in python/cpython
 // ═══════════════════════════════════════════════════════════════════════════
-const EXPERTS = {
-  rules: [
-    [/^\.github\//,['ezio-melotti','hugovk','AA-Turner','webknjaz','JacobCoffee']],
-    [/^configure/,['erlend-aasland','corona10','AA-Turner','emmatyping']],
-    [/^Makefile\.pre/,['erlend-aasland','AA-Turner','emmatyping']],
-    [/^Modules\/Setup/,['erlend-aasland','AA-Turner','emmatyping']],
-    [/^Doc\/c-api\//,['ZeroIntensity']],
-    [/^Doc\/reference\//,['willingc','AA-Turner']],
-    [/^Doc\//,['AA-Turner','hugovk']],
-    [/^Tools\/clinic\//,['erlend-aasland','AA-Turner']],
-    [/^Misc\/stable_abi/,['encukou']],
-    [/^Tools\/build\/stable_abi/,['encukou']],
-    [/^Platforms\/Android\//,['mhsmith','freakboy3742']],
-    [/^Platforms\/Apple\//,['freakboy3742']],
-    [/^Mac\//,['freakboy3742']],
-    [/^Platforms\/WASI/,['brettcannon','emmatyping','savannahostrowski']],
-    [/^PC\/|^PCbuild\//,['python-windows-team']],
-    [/^Lib\/_ast_unparse|^Lib\/ast|^Parser\/asdl|^Python\/ast/,['isidentical','JelleZijlstra','eclips4','tomasr8']],
-    [/^Objects\/call\.c$/,['markshannon']],
-    [/^Objects\/codeobject/,['markshannon']],
-    [/^Objects\/dict/,['methane','markshannon']],
-    [/^Objects\/frameobject/,['markshannon']],
-    [/genobject/,['markshannon']],
-    [/^Objects\/object\.c$/,['ZeroIntensity']],
-    [/^Objects\/set/,['rhettinger']],
-    [/^Objects\/type(?!var)/,['markshannon']],
-    [/^Objects\/typevarobject/,['JelleZijlstra']],
-    [/^Objects\/unionobject/,['JelleZijlstra']],
-    [/^Python\/bytecodes|^Python\/ceval/,['markshannon']],
-    [/^Tools\/cases_generator\//,['markshannon']],
-    [/^Python\/assemble|^Python\/codegen|^Python\/compile/,['markshannon','iritkatriel']],
-    [/^Python\/flowgraph/,['markshannon','iritkatriel','eclips4']],
-    [/^Python\/symtable/,['JelleZijlstra','carljm']],
-    [/contextvars|hamt/i,['1st1']],
-    [/bltinmodule|sysmodule/,['ericsnowcurrently']],
-    [/^Objects\/exceptions|test_except/,['iritkatriel']],
-    [/pyhash/,['gpshead','picnixz']],
-    [/^Python\/import\.c$/,['brettcannon','ericsnowcurrently','ncoghlan','warsaw','FFY00','kumaraditya303']],
-    [/import/i,['brettcannon','ericsnowcurrently','ncoghlan','warsaw','FFY00']],
-    [/freeze|frozen/,['ericsnowcurrently']],
-    [/^Python\/jit|^Tools\/jit\//,['brandtbucher','savannahostrowski','diegorusso']],
-    [/lazyimport/,['yhg1s','DinoV','pablogsal']],
-    [/optimizer/,['markshannon','Fidget-Spinner']],
-    [/^Grammar\/|^Parser\/|^Tools\/peg_generator\//,['pablogsal','lysnikolaou']],
-    [/^Lib\/tokenize/,['pablogsal','lysnikolaou']],
-    [/gil/i,['ericsnowcurrently']],
-    [/pylifecycle|pystate/,['ericsnowcurrently','ZeroIntensity','FFY00']],
-    [/^Python\/remote_debug|^Modules\/_remote_debugging/,['pablogsal']],
-    [/crossinterp|_interp/,['ericsnowcurrently']],
-    [/interpolationobject|templateobject/,['lysnikolaou']],
-    [/^Lib\/annotationlib/,['JelleZijlstra']],
-    [/^Lib\/argparse/,['savannahostrowski']],
-    [/asyncio/,['1st1','asvetlov','kumaraditya303','willingc']],
-    [/bisect/,['rhettinger']],
-    [/hashlib|hashopenssl|hmac|_ssl/,['gpshead','picnixz']],
-    [/cjkcodecs/,['corona10']],
-    [/^Lib\/collections|_collectionsmodule/,['rhettinger']],
-    [/dataclasses/,['ericvsmith']],
-    [/time\.py|datetime|zoneinfo/,['pganssle','StanFromIreland']],
-    [/^Lib\/dbm|_dbm/,['corona10','erlend-aasland','serhiy-storchaka']],
-    [/mail|smtp|mime|imap|poplib/i,['python-email-team']],
-    [/ensurepip/,['pfmoore','pradyunsg']],
-    [/^Lib\/enum/,['ethanfurman']],
-    [/ftplib/,['giampaolo']],
-    [/functools|_functoolsmodule/,['rhettinger']],
-    [/gcmodule|^Doc\/library\/gc/,['pablogsal']],
-    [/gettext/,['tomasr8']],
-    [/heapq/,['rhettinger']],
-    [/^Lib\/html/,['ezio-melotti']],
-    [/idlelib/,['terryjreedy']],
-    [/importlib/,['jaraco','warsaw','FFY00']],
-    [/itertools/,['rhettinger']],
-    [/^Lib\/logging\//,['vsajip']],
-    [/multiprocessing/,['gpshead']],
-    [/^Lib\/pathlib\//,['barneygale']],
-    [/^Lib\/pdb|^Lib\/bdb/,['gaogaotiantian']],
-    [/^Lib\/pydoc/,['AA-Turner']],
-    [/_pyrepl/,['pablogsal','lysnikolaou','ambv']],
-    [/random|_randommodule/,['rhettinger']],
-    [/shutil/,['giampaolo']],
-    [/sqlite3|_sqlite/,['erlend-aasland']],
-    [/subprocess/,['gpshead']],
-    [/tarfile/,['ethanfurman']],
-    [/tomllib/,['encukou','hauntsaninja']],
-    [/^Lib\/typing/,['JelleZijlstra','AlexWaygood']],
-    [/^Lib\/types\.py|_typesmodule/,['AA-Turner']],
-    [/unittest\/mock/,['cjw296']],
-    [/weakref/,['kumaraditya303']],
-    [/zlib|_zlibmodule/,['StanFromIreland']],
-    [/^Lib\/compression\/zstd|^Modules\/_zstd/,['AA-Turner','emmatyping']],
-    [/stackref/,['Fidget-Spinner']],
-  ],
-  profiles: {
-    'markshannon':      {area:'Bytecode, eval loop, compiler, dict, frame, type objects'},
-    'JelleZijlstra':    {area:'Typing, annotations, AST, type params, union types'},
-    'ericsnowcurrently':{area:'Runtime state, subinterpreters, import system, GIL'},
-    'brettcannon':      {area:'Import system, devguide, WASI'},
-    '1st1':             {area:'asyncio, contextvars, HAMT'},
-    'asvetlov':         {area:'asyncio'},
-    'kumaraditya303':   {area:'asyncio, weakref, import'},
-    'rhettinger':       {area:'collections, functools, itertools, random, heapq, set, bisect'},
-    'iritkatriel':      {area:'Exceptions, compiler (assemble/codegen/flowgraph)'},
-    'erlend-aasland':   {area:'SQLite, build system, Argument Clinic'},
-    'pablogsal':        {area:'Grammar/PEG, GC, remote debug, profiling, PyREPL'},
-    'gpshead':          {area:'ssl, hashlib, multiprocessing, subprocess, socket'},
-    'picnixz':          {area:'ssl, hashlib, cryptographic primitives'},
-    'AA-Turner':        {area:'Docs, build, types, pydoc, zstd'},
-    'encukou':          {area:'Stable ABI, tomllib, Limited C API'},
-    'barneygale':       {area:'pathlib'},
-    'ericvsmith':       {area:'dataclasses'},
-    'ZeroIntensity':    {area:'C API docs, object.c, runtime lifecycle'},
-    'brandtbucher':     {area:'JIT, pattern matching'},
-    'savannahostrowski':{area:'JIT, WASI, argparse, GitHub Actions'},
-    'lysnikolaou':      {area:'Grammar/PEG, t-strings, tokenize, PyREPL'},
-    'eclips4':          {area:'AST, flowgraph'},
-    'tomasr8':          {area:'AST, gettext, optimizer'},
-    'isidentical':      {area:'AST'},
-    'methane':          {area:'dict objects'},
-    'ncoghlan':         {area:'Import system, PEPs, devguide'},
-    'warsaw':           {area:'Import system, importlib, site'},
-    'FFY00':            {area:'Build, getpath, sysconfig, importlib, WASI'},
-    'emmatyping':       {area:'Build, WASI, Emscripten, zstd'},
-    'corona10':         {area:'CJK codecs, dbm, build'},
-    'vsajip':           {area:'logging, venv'},
-    'pganssle':         {area:'datetime, time, zoneinfo'},
-    'StanFromIreland':  {area:'turtle, zlib, datetime docs'},
-    'gaogaotiantian':   {area:'pdb, bdb, remote pdb'},
-    'ezio-melotti':     {area:'html, GitHub config, docs'},
-    'hugovk':           {area:'colorize, GitHub config, docs'},
-    'giampaolo':        {area:'shutil, ftplib'},
-    'jaraco':           {area:'configparser, importlib resources/metadata'},
-    'ethanfurman':      {area:'enum, tarfile'},
-    'AlexWaygood':      {area:'typing'},
-    'willingc':         {area:'asyncio docs, reference docs'},
-    'carljm':           {area:'symtable'},
-    'ambv':             {area:'PyREPL (Lukasz Langa)'},
-    'sethmlarson':      {area:'SBOM, supply chain security'},
-    'serhiy-storchaka': {area:'many stdlib modules'},
-    'Fidget-Spinner':   {area:'Tier-2 optimizer, stackref'},
-    'mhsmith':          {area:'Android'},
-    'freakboy3742':     {area:'iOS, Android, Emscripten'},
-    'diegorusso':       {area:'JIT'},
-    'yhg1s':            {area:'Lazy imports'},
-    'DinoV':            {area:'Lazy imports'},
-    'hauntsaninja':     {area:'tomllib'},
-    'pfmoore':          {area:'ensurepip, pip'},
-    'pradyunsg':        {area:'ensurepip, pip'},
-    'cjw296':           {area:'unittest.mock'},
-    'terryjreedy':      {area:'IDLE, turtle'},
-  },
-  resolve(files) {
-    const seen=new Set(),res=[];
-    for(const f of files)
-      for(const [pat,users] of this.rules)
-        if(pat.test(f.filename))
-          for(const u of users)
-            if(!seen.has(u)){seen.add(u);res.push({user:u,file:f.filename,info:this.profiles[u]||{area:'CPython expert'}});}
-    return res.slice(0,12);
+// CODEOWNERS EXPERT ROUTING — resolved from the PR base revision.
+const CODEOWNERS_PATHS = [
+  '.github/CODEOWNERS',
+  'CODEOWNERS',
+  'docs/CODEOWNERS',
+];
+
+function codeownersPatternToRegex(pattern) {
+  let p = pattern.trim();
+  if (!p || p.startsWith('#')) return null;
+
+  // CODEOWNERS exclusion rules do not identify an owner.
+  if (p.startsWith('!')) return null;
+
+  const anchored = p.startsWith('/');
+  p = p.replace(/^\/+/, '');
+
+  // A trailing slash explicitly denotes a directory.
+  const explicitDirectory = p.endsWith('/');
+  p = p.replace(/\/+$/, '');
+
+  // CPython also uses directory patterns without a trailing slash,
+  // e.g. "Platforms/WASI" and "Tools/wasm/wasi". Treat a pattern
+  // containing no glob metacharacters in its final path component
+  // as matching the path itself and descendants.
+  const hasGlob = /[*?[]/.test(p);
+  const directoryLike = explicitDirectory || !hasGlob;
+
+  let out = '';
+
+  for (let i = 0; i < p.length; i++) {
+    const c = p[i];
+
+    if (c === '*') {
+      if (p[i + 1] === '*') {
+        i++;
+
+        if (p[i + 1] === '/') {
+          i++;
+          out += '(?:.*/)?';
+        } else {
+          out += '.*';
+        }
+      } else {
+        out += '[^/]*';
+      }
+      continue;
+    }
+
+    if (c === '?') {
+      out += '[^/]';
+      continue;
+    }
+
+    if (c === '[') {
+      const close = p.indexOf(']', i + 1);
+      if (close !== -1) {
+        out += p.slice(i, close + 1);
+        i = close;
+        continue;
+      }
+    }
+
+    if ('\\.{}()+-^$|'.includes(c)) {
+      out += '\\' + c;
+      continue;
+    }
+
+    out += c;
   }
+
+  if (directoryLike) {
+    out += '(?:/.*)?';
+  }
+
+  return new RegExp(
+    anchored
+      ? '^' + out + '$'
+      : '^(?:.*/)?' + out + '$'
+  );
+}
+
+function parseCodeowners(text) {
+  const rules = [];
+
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+
+    const fields = line.split(/\s+/);
+    if (fields.length < 2) continue;
+
+    const pattern = fields.shift();
+    const owners = fields
+      .filter(Boolean)
+      .map(owner => owner.replace(/^@/, ''));
+
+    const regex = codeownersPatternToRegex(pattern);
+    if (!regex || !owners.length) continue;
+
+    rules.push({
+      pattern,
+      regex,
+      owners,
+    });
+  }
+
+  return rules;
+}
+
+async function fetchCodeowners(baseSha) {
+  for (const path of CODEOWNERS_PATHS) {
+    try {
+      const d = await ghGet(
+        `/contents/${path}?ref=${encodeURIComponent(baseSha)}`
+      );
+
+      if (!d || !d.content) continue;
+
+      const text = atob(d.content.replace(/\n/g, ''));
+      return {
+        path,
+        sha: d.sha || null,
+        rules: parseCodeowners(text),
+      };
+    } catch {
+      // Try the next supported CODEOWNERS location.
+    }
+  }
+
+  return {
+    path: null,
+    sha: null,
+    rules: [],
+  };
+}
+
+async function resolveCodeowners(files, baseSha) {
+  const source = await fetchCodeowners(baseSha);
+  const seen = new Set();
+  const result = [];
+
+  for (const f of files) {
+    const filename = f.filename || '';
+
+    // CODEOWNERS uses the final matching rule for a path.
+    let owners = null;
+    let matchedPattern = null;
+
+    for (const rule of source.rules) {
+      if (rule.regex.test(filename)) {
+        owners = rule.owners;
+        matchedPattern = rule.pattern;
+      }
+    }
+
+    if (!owners) continue;
+
+    for (const owner of owners) {
+      if (seen.has(owner)) continue;
+
+      seen.add(owner);
+      result.push({
+        user: owner,
+        file: filename,
+        pattern: matchedPattern,
+        source: source.path,
+        source_sha: source.sha,
+        info: {
+          area: 'CODEOWNERS reviewer',
+        },
+      });
+    }
+  }
+
+  return {
+    experts: result.slice(0, 12),
+    source: source.path,
+    source_sha: source.sha,
+  };
+}
+
+const EXPERTS = {
+  async resolve(files, baseSha) {
+    return resolveCodeowners(files, baseSha);
+  },
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -865,13 +892,16 @@ async function run(){
 
     setStep('sta','run');
     const an=analyze(files);ctx.an=an;
-    ctx.experts=EXPERTS.resolve(files);
+    ctx.experts=(await EXPERTS.resolve(
+      files,
+      pr.base?.sha || 'main'
+    )).experts;
     ctx.labelAnalysis=analyzeLabels(pr.labels||[]);
     const {crits,highs}=an.sum;
     setStep('sta','done',crits?`${crits} critical!`:highs?`${highs} high`:'clean');
 
     setStep('ai','run');
-    const rpt=await callClaude(ctx,num,an,selBr);
+    const rpt=buildBrowserAssessment(ctx,num,an,selBr);
     setStep('ai','done','complete');
 
     setTimeout(()=>{$('pipea').innerHTML='';},600);
@@ -887,117 +917,238 @@ async function run(){
 // ═══════════════════════════════════════════════════════════════════════════
 // CLAUDE CALL
 // ═══════════════════════════════════════════════════════════════════════════
-async function callClaude(ctx,prNum,an,branch){
-  const pr=ctx.pr,files=ctx.files||[],hist=ctx.hist||{};
-  const timeline=ctx.timeline||[],issues=ctx.issues||[];
-  const peps=ctx.peps||[],discuss=ctx.discuss||[];
-  const experts=ctx.experts||[],brImpact=ctx.brImpact||{};
+function buildBrowserAssessment(ctx,prNum,an,branch){
+  const pr=ctx.pr||{};
+  const files=ctx.files||[];
+  const timeline=ctx.timeline||[];
+  const issues=ctx.issues||[];
   const labelAnalysis=ctx.labelAnalysis||[];
+  const brImpact=ctx.brImpact||{};
 
-  const fsumm=files.map(f=>`${f.filename} [${classify(f.filename).sub}] +${f.additions}-${f.deletions}`).join('\n');
-  const patches=files.slice(0,10).map(f=>`### ${f.filename}\n\`\`\`diff\n${(f.patch||'').slice(0,900)}\n\`\`\``).join('\n\n');
-  const histCtx=Object.entries(hist).map(([file,cs])=>`${file}:\n${cs.map(c=>`  ${c.sha} ${c.date} [${c.author}] ${c.msg}`).join('\n')}`).join('\n\n');
+  /*
+   * Browser mode is intentionally deterministic and read-only.
+   *
+   * Do not put provider credentials or direct AI-provider requests here.
+   * The CLI/server-side workflow is the supported path for optional AI
+   * synthesis. Browser mode should remain usable with only public GitHub
+   * data and local static analysis.
+   */
 
-  const humanTL=timeline.filter(x=>!x.isBot).slice(0,40);
-  const tlNarrative=humanTL.map(x=>{
-    if(x.kind==='comment')return `[${x.date?.slice(0,10)}] @${x.login} comment: ${(x.body||'').slice(0,250)}`;
-    if(x.kind==='review')return `[${x.date?.slice(0,10)}] @${x.login} REVIEW[${x.state}]: ${(x.body||'').slice(0,250)}`;
-    if(x.kind==='inline')return `[${x.date?.slice(0,10)}] @${x.login} inline on ${x.path}: ${(x.body||'').slice(0,200)}`;
-    if(x.kind==='labeled')return `[${x.date?.slice(0,10)}] @${x.login} added label: ${x.ev?.label?.name}`;
-    if(x.kind==='unlabeled')return `[${x.date?.slice(0,10)}] @${x.login} removed label: ${x.ev?.label?.name}`;
-    if(x.kind==='merged')return `[${x.date?.slice(0,10)}] MERGED by @${x.login}`;
-    if(x.kind==='closed')return `[${x.date?.slice(0,10)}] CLOSED by @${x.login}`;
-    if(x.kind==='cross-referenced')return `[${x.date?.slice(0,10)}] Cross-ref from #${x.ev?.source?.issue?.number}`;
-    return `[${x.date?.slice(0,10)}] ${x.kind} by @${x.login}`;
-  }).join('\n');
+  const changed=files.length;
+  const additions=files.reduce((n,f)=>n+(Number(f.additions)||0),0);
+  const deletions=files.reduce((n,f)=>n+(Number(f.deletions)||0),0);
 
-  const issueCtxStr=issues.map(i=>`Issue #${i.num} [${i.state}]: ${i.title}\nCreated: ${i.created} | Labels: ${i.labels.map(l=>l.name).join(', ')}\n${i.body}\nLabel history: ${i.labelHistory.map(l=>`"${l.label}" by @${l.actor} on ${l.date}`).join(' -> ')}\nComments:\n${i.humanComments.map(c=>`  @${c.login} (${c.date}): ${c.body}`).join('\n')}`).join('\n\n');
+  const humanEvents=timeline.filter(x=>!x.isBot);
+  const reviews=humanEvents.filter(x=>x.kind==='review');
+  const inline=humanEvents.filter(x=>x.kind==='inline');
+  const issueCount=issues.length;
 
-  const labelStr=labelAnalysis.map(l=>`"${l.name}": ${l.meaning} | Signal: ${l.signal}`).join('\n');
-  const expStr=experts.slice(0,8).map(e=>`@${e.user} (${e.info?.area||'expert'})`).join(', ');
+  const apiIssues=(an.api||[]).length;
+  const sigIssues=(an.sig||[]).length;
+  const cIssues=(an.c||[]).length;
+  const refcountIssues=(an.rc||[]).length;
+  const securityIssues=(an.sec||[]).length;
+  const platformIssues=(an.plat||[]).length;
+  const freeThreadIssues=(an.ft||[]).length;
+  const abiIssues=(an.abi||[]).length;
+  const testGaps=(an.tgaps||[]).length;
+  const newsMissing=(an.newsmiss||[]).length;
 
-  const staticCtx=`STATIC ANALYSIS (CPython 3.16-main: 93 bytecodes, 1247 stable ABI items, 393 tests):
-API breaks: ${JSON.stringify(an.api)}
-Sig changes: ${JSON.stringify(an.sig.slice(0,8))}
-C issues: ${JSON.stringify(an.c)}
-Refcount: ${JSON.stringify(an.rc)}
-Python AST: ${JSON.stringify(an.py)}
-Security: ${JSON.stringify(an.sec)}
-Platform: ${JSON.stringify(an.plat)}
-Free-thread risks: ${JSON.stringify(an.ft)}
-Stable ABI: ${JSON.stringify(an.abi)}
-Test gaps: ${JSON.stringify(an.tgaps.slice(0,12))}
-Test files needed: ${JSON.stringify(an.tneeded)}
-NEWS missing: ${JSON.stringify(an.newsmiss)}
-Grammar changes: ${an.grammar.join(', ')||'none'}
-CODEOWNERS experts: ${expStr}`;
+  const warnings=[];
+  const critical=[];
 
-  const sys=`You are a CPython core developer reviewing a PR. You have been given the FULL CONVERSATION HISTORY in chronological order, the complete linked issue timeline, discuss.python.org threads, and static analysis from the actual CPython 3.16-main repo.
+  if(!prNum){
+    warnings.push('PR number was not provided.');
+  }
 
-Your review synthesises ALL OF IT:
-- Who said what in the timeline? What concerns were raised and resolved? What is the current consensus?
-- Does the linked issue justify this PR? Does the fix address the root cause?
-- What do the labels signal about current review state?
-- Which CODEOWNERS experts are needed and why?
-- What is the community sentiment from discuss.python.org?
+  if(!changed){
+    warnings.push('No changed files were available for browser analysis.');
+  }
 
-CPython review standards:
-1. MINIMAL: Does exactly one thing. No scope creep.
-2. LEGITIMATE: Fixes a real bug with an issue, or implements an accepted PEP.
-3. NON-INTERFERING: Does not touch unrelated code.
-4. NEWS entry required in Misc/NEWS.d/next/<CATEGORY>/gh-NNNNN.rst
-5. Regression test required
-6. Backward compat: 2-version DeprecationWarning before any removal
-7. C code: PyMem_* not malloc, PyOS_snprintf not sprintf, Argument Clinic
-8. Free-threading: Lib/test/test_free_threading/ for GIL-sensitive changes
-9. Grammar changes: make regen-pegen && make regen-all
-10. Branch policy: 3.10=security-only, 3.11-3.13=bug-fixes-only, 3.14=prerelease, main=all
+  if(apiIssues+cIssues+securityIssues+freeThreadIssues+abiIssues>0){
+    critical.push(
+      'Static analysis reported potentially significant implementation risks.'
+    );
+  }
 
-Respond ONLY with valid JSON (no fences):
-{"verdict":"APPROVE"|"REQUEST_CHANGES"|"NEEDS_INFO"|"REJECT","verdict_reason":"one sentence","confidence":1-5,"priority":"low"|"medium"|"high"|"critical","regression_risk":"low"|"medium"|"high","is_minimal":"yes"|"no"|"mostly","is_legitimate":"yes"|"no"|"unclear","is_non_interfering":"yes"|"no"|"unknown","consensus":"clear"|"emerging"|"divided"|"none","timeline_assessment":"paragraph on conversation history - who said what, stalled discussions, resolved concerns","label_assessment":"what current labels signal about review state","issue_assessment":"does the linked issue justify this? does the fix address root cause?","discuss_assessment":"community sentiment from discuss.py or N/A","expert_routing":"specific people from CODEOWNERS and why each is needed","cherry_pick":"backport recommendation with reasoning","summary":"3-4 sentences: what/why/how/quality","news_category":"exact Misc/NEWS.d/next/<CAT>","pep_alignment":"PEP analysis or N/A","free_thread_analysis":"free-threading safety","compat_analysis":"backward compat analysis","test_verdict":"specific tests needed","checklist":[{"status":"pass"|"fail"|"warn"|"na","item":"check","note":"specific evidence from comments or diff"}],"feedback":"## Overview\n## Timeline & Discussion\n## Critical Issues\n## Code Quality\n## Test Coverage\n## Compatibility\n## Changelog & Docs\n## Recommendations\n\nQuote actual reviewer comments. Be specific. Reference filenames.","components":["subsystems"],"labels":["github-label-suggestions"],"source_refs":[{"type":"pep"|"discuss"|"issue","label":"short","url":"url or null","relevance":"one sentence"}]}`;
+  if(testGaps>0){
+    warnings.push(`${testGaps} potential test gap(s) detected by static analysis.`);
+  }
 
-  const user=`PR #${prNum}: ${pr.title}
-Author: @${pr.user?.login} | Base: ${pr.base?.ref} | State: ${pr.state}${pr.draft?' (DRAFT)':''}
-Labels: ${(pr.labels||[]).map(l=>l.name).join(', ')||'none'}
+  if(newsMissing>0){
+    warnings.push(`${newsMissing} potential NEWS entry gap(s) detected.`);
+  }
 
-=== LABEL SIGNALS ===
-${labelStr||'(none)'}
+  const hasHumanReview=reviews.length>0||inline.length>0;
+  const hasLinkedIssue=issueCount>0;
+  const draft=!!pr.draft;
 
-=== PR DESCRIPTION ===
-${(pr.body||'(none)').slice(0,2000)}
+  let verdict='NEEDS_INFO';
+  let priority='low';
+  let regressionRisk='low';
 
-=== FULL TIMELINE (chronological, bots filtered) ===
-${tlNarrative||'(no human events)'}
+  if(critical.length){
+    verdict='REQUEST_CHANGES';
+    priority='high';
+    regressionRisk='high';
+  }else if(warnings.length){
+    verdict='NEEDS_INFO';
+    priority='medium';
+    regressionRisk=(testGaps>0||apiIssues>0||sigIssues>0)?'medium':'low';
+  }else if(!hasLinkedIssue||!hasHumanReview){
+    verdict='NEEDS_INFO';
+    priority='low';
+    regressionRisk='low';
+  }else{
+    verdict='NEEDS_INFO';
+  }
 
-=== FILES CHANGED ===
-${fsumm}
+  const checklist=[
+    {
+      status:changed?'pass':'warn',
+      item:'Changed files available',
+      note:`${changed} file(s), +${additions}/-${deletions} lines.`
+    },
+    {
+      status:hasLinkedIssue?'pass':'warn',
+      item:'Linked issue evidence',
+      note:hasLinkedIssue
+        ? `${issueCount} linked issue record(s) available.`
+        : 'No linked issue history was available to browser analysis.'
+    },
+    {
+      status:hasHumanReview?'pass':'warn',
+      item:'Human review evidence',
+      note:hasHumanReview
+        ? `${reviews.length} review(s) and ${inline.length} inline review event(s) available.`
+        : 'No human review or inline review events were available.'
+    },
+    {
+      status:apiIssues?'warn':'pass',
+      item:'API compatibility',
+      note:apiIssues
+        ? `${apiIssues} API compatibility signal(s) reported.`
+        : 'No API compatibility signals reported by static analysis.'
+    },
+    {
+      status:sigIssues?'warn':'pass',
+      item:'Signature changes',
+      note:sigIssues
+        ? `${sigIssues} signature-change signal(s) reported.`
+        : 'No signature-change signals reported.'
+    },
+    {
+      status:cIssues?'warn':'pass',
+      item:'C implementation',
+      note:cIssues
+        ? `${cIssues} C implementation signal(s) reported.`
+        : 'No C implementation signals reported.'
+    },
+    {
+      status:securityIssues?'warn':'pass',
+      item:'Security analysis',
+      note:securityIssues
+        ? `${securityIssues} security signal(s) reported.`
+        : 'No security signals reported.'
+    },
+    {
+      status:freeThreadIssues?'warn':'pass',
+      item:'Free-threading analysis',
+      note:freeThreadIssues
+        ? `${freeThreadIssues} free-threading signal(s) reported.`
+        : 'No free-threading signals reported.'
+    },
+    {
+      status:abiIssues?'warn':'pass',
+      item:'Stable ABI analysis',
+      note:abiIssues
+        ? `${abiIssues} stable-ABI signal(s) reported.`
+        : 'No stable-ABI signals reported.'
+    },
+    {
+      status:testGaps?'warn':'pass',
+      item:'Regression-test coverage',
+      note:testGaps
+        ? `${testGaps} potential test gap(s) reported.`
+        : 'No test gaps reported by static analysis.'
+    },
+    {
+      status:newsMissing?'warn':'pass',
+      item:'NEWS entry',
+      note:newsMissing
+        ? `${newsMissing} potential NEWS gap(s) reported.`
+        : 'No NEWS gap reported by static analysis.'
+    }
+  ];
 
-=== PATCHES ===
-${patches}
+  const summary=[
+    `Browser deterministic assessment for PR #${prNum||'unknown'}.`,
+    `${changed} changed file(s), with +${additions}/-${deletions} line changes.`,
+    `${reviews.length} review(s), ${inline.length} inline review event(s), and ${issueCount} linked issue record(s) were available.`,
+    'This result is evidence-only and is not an AI-generated maintainer verdict.'
+  ].join(' ');
 
-=== GIT HISTORY ===
-${histCtx||'(none)'}
-
-=== LINKED ISSUE HISTORY ===
-${issueCtxStr||'(none)'}
-
-=== PEPs ===
-${peps.map(p=>`PEP ${p.num} [${p.status}]: ${p.title}\n${p.url}`).join('\n')||'(none)'}
-
-=== discuss.python.org ===
-${discuss.map(d=>`"${d.title}" ${d.posts} posts ${d.views} views\n${d.url}\n${d.excerpt}`).join('\n\n')||'(none)'}
-
-=== BRANCHES ===
-${JSON.stringify(brImpact)}
-
-${staticCtx}`;
-
-  const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:4000,system:sys,messages:[{role:'user',content:user}]})});
-  if(!res.ok)throw new Error('Claude API error '+res.status);
-  const d=await res.json();
-  const raw=(d.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('');
-  try{return JSON.parse(raw.replace(/```json|```/g,'').trim());}
-  catch{throw new Error('Could not parse AI response. Try again.');}
+  return {
+    verdict,
+    verdict_reason:
+      'Browser mode provides a deterministic evidence summary only; maintainer judgment is required.',
+    confidence:1,
+    priority,
+    regression_risk:regressionRisk,
+    is_minimal:'mostly',
+    is_legitimate:hasLinkedIssue?'unclear':'unclear',
+    is_non_interfering:'unknown',
+    consensus:hasHumanReview?'emerging':'none',
+    timeline_assessment:
+      `${humanEvents.length} human timeline event(s) were available. Browser mode does not infer consensus from them.`,
+    label_assessment:
+      labelAnalysis.length
+        ? `${labelAnalysis.length} label signal(s) were analyzed.`
+        : 'No label signals were available.',
+    issue_assessment:
+      hasLinkedIssue
+        ? 'Linked issue evidence is available; root-cause alignment requires maintainer review.'
+        : 'No linked issue evidence was available.',
+    discuss_assessment:'N/A in deterministic browser mode.',
+    expert_routing:'CODEOWNERS-based routing is informational and should be verified against the PR base revision.',
+    cherry_pick:'Requires maintainer assessment based on branch policy and backport suitability.',
+    summary,
+    news_category:'Misc/NEWS.d/next/<CATEGORY>',
+    pep_alignment:'Requires maintainer review of any linked PEP evidence.',
+    free_thread_analysis:
+      freeThreadIssues
+        ? `${freeThreadIssues} free-threading signal(s) require review.`
+        : 'No free-threading signals reported.',
+    compat_analysis:
+      apiIssues+abiIssues
+        ? `${apiIssues} API and ${abiIssues} stable-ABI signal(s) were reported.`
+        : 'No API or stable-ABI signals reported.',
+    test_verdict:
+      testGaps
+        ? `${testGaps} potential test gap(s) require review.`
+        : 'No test gaps reported by static analysis.',
+    checklist,
+    feedback:
+      '## Overview\n' +
+      summary +
+      '\n\n## Timeline & Discussion\n' +
+      `${humanEvents.length} human timeline event(s) available. No AI synthesis performed in browser mode.` +
+      '\n\n## Critical Issues\n' +
+      `${critical.length ? critical.join('\\n') : 'No high-risk static-analysis findings were reported.'}` +
+      '\n\n## Code Quality\n' +
+      `${cIssues+sigIssues} C/signature signal(s) reported.` +
+      '\n\n## Test Coverage\n' +
+      `${testGaps} potential test gap(s).` +
+      '\n\n## Compatibility\n' +
+      `${apiIssues} API and ${abiIssues} stable-ABI signal(s).` +
+      '\n\n## Changelog & Docs\n' +
+      `${newsMissing} potential NEWS gap(s).` +
+      '\n\n## Recommendations\n' +
+      `${warnings.length ? warnings.join(' ') : 'Review the collected evidence and make the final maintainer decision.'}`,
+    components:[],
+    labels:[],
+    source_refs:[]
+  };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

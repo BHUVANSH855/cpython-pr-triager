@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cpython-pr-triager"
+version = "0.9.0"
+description = "Evidence-based maintainer-assist tooling for CPython pull requests"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+cpython-pr-triager = "scripts.analyze:main"
+
+[tool.setuptools.packages.find]
+include = ["scripts", "scripts.*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["*Tests"]
+addopts = "-v --tb=short"
+pythonpath = ["."]

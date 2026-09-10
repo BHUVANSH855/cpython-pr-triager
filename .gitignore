@@ -14,4 +14,9 @@ Thumbs.db
 
 # Local triager regression outputs
 data/current-*.json
+
+# Generated JSON data is ignored by default.
+# The branch lifecycle policy is versioned explicitly.
 data/*.json
+!data/branch-policy.json
+!data/cpython-review-policy.json

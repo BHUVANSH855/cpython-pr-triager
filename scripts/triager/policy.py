@@ -5,12 +5,19 @@ Deterministic policy decisions for CPython PR triage.
 from __future__ import annotations
 
 import datetime as dt
+import json
+import os
 import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 MAINTENANCE_BRANCH_RE = re.compile(r"^3\.\d+$")
+
+BRANCH_POLICY_FILENAME = "branch-policy.json"
+BRANCH_POLICY_ENV = "CPYTHON_TRIAGER_BRANCH_POLICY"
+BRANCH_POLICY_MAX_AGE_ENV = "CPYTHON_TRIAGER_BRANCH_POLICY_MAX_AGE_DAYS"
+DEFAULT_BRANCH_POLICY_MAX_AGE_DAYS = 45
 
 DEFAULT_BRANCH_POLICIES: dict[str, str] = {
     "main": "feature",
@@ -43,11 +50,152 @@ VALID_BRANCH_STATUSES = frozenset(
     }
 )
 
+def _branch_policy_path() -> Path:
+    override = os.environ.get(BRANCH_POLICY_ENV)
+    if override:
+        return Path(override).expanduser()
+
+    return (
+        Path(__file__).resolve().parents[2]
+        / "data"
+        / BRANCH_POLICY_FILENAME
+    )
+
+
+def _load_branch_policy_snapshot() -> tuple[dict[str, str], dict[str, Any]]:
+    path = _branch_policy_path()
+
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return dict(DEFAULT_BRANCH_POLICIES), {
+            "status": "missing",
+            "path": str(path),
+        }
+
+    if not isinstance(payload, Mapping):
+        return dict(DEFAULT_BRANCH_POLICIES), {
+            "status": "invalid",
+            "path": str(path),
+        }
+
+    statuses = payload.get("statuses")
+    if not isinstance(statuses, Mapping):
+        return dict(DEFAULT_BRANCH_POLICIES), {
+            "status": "invalid",
+            "path": str(path),
+        }
+
+    policies: dict[str, str] = {}
+
+    for branch, status in statuses.items():
+        if not isinstance(branch, str) or not isinstance(status, str):
+            continue
+
+        normalized_status = status.strip().lower()
+
+        if normalized_status in VALID_BRANCH_STATUSES:
+            policies[branch.strip()] = normalized_status
+
+    if not policies:
+        return dict(DEFAULT_BRANCH_POLICIES), {
+            "status": "invalid",
+            "path": str(path),
+        }
+
+    metadata = {
+        "status": "ok",
+        "path": str(path),
+        "schema_version": payload.get("schema_version"),
+        "source": payload.get("source"),
+        "retrieved_at": payload.get("retrieved_at"),
+    }
+
+    return policies, metadata
+
+
+DEFAULT_BRANCH_POLICIES, BRANCH_POLICY_METADATA = (
+    _load_branch_policy_snapshot()
+)
+
 SECURITY_ONLY_BRANCHES = frozenset(
     branch
     for branch, status in DEFAULT_BRANCH_POLICIES.items()
     if status == "security"
 )
+
+def _branch_policy_max_age_days() -> float:
+    raw_value = os.environ.get(BRANCH_POLICY_MAX_AGE_ENV)
+
+    if raw_value is None:
+        return float(DEFAULT_BRANCH_POLICY_MAX_AGE_DAYS)
+
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        return float(DEFAULT_BRANCH_POLICY_MAX_AGE_DAYS)
+
+    return max(0.0, value)
+
+
+def _branch_policy_metadata_signals() -> list[tuple[str, str]]:
+    status = BRANCH_POLICY_METADATA.get("status")
+
+    if status == "missing":
+        return [
+            (
+                "WARN",
+                "Branch lifecycle policy snapshot could not be loaded; "
+                "using the built-in fallback policy.",
+            )
+        ]
+
+    if status == "invalid":
+        return [
+            (
+                "WARN",
+                "Branch lifecycle policy snapshot is invalid; using the "
+                "built-in fallback policy.",
+            )
+        ]
+
+    retrieved_at = BRANCH_POLICY_METADATA.get("retrieved_at")
+
+    if not isinstance(retrieved_at, str) or not retrieved_at.strip():
+        return [
+            (
+                "WARN",
+                "Branch lifecycle policy snapshot has no retrieval "
+                "timestamp; freshness could not be verified.",
+            )
+        ]
+
+    age = _iso_age_days(retrieved_at)
+
+    if age is None:
+        return [
+            (
+                "WARN",
+                "Branch lifecycle policy snapshot has an invalid retrieval "
+                "timestamp; freshness could not be verified.",
+            )
+        ]
+
+    max_age = _branch_policy_max_age_days()
+
+    if age > max_age:
+        return [
+            (
+                "WARN",
+                f"Branch lifecycle policy snapshot is about {age:.0f} days "
+                f"old, exceeding the configured {max_age:.0f}-day freshness "
+                "window; refresh the snapshot before relying on lifecycle "
+                "decisions.",
+            )
+        ]
+
+    return []
 
 BACKPORT_LABEL_RE = re.compile(
     r"^needs backport to (\d+\.\d+)$",
@@ -553,6 +701,8 @@ def process_signals(
     patterns: dict[str, Any] | None,
 ) -> tuple[list[tuple[str, str]], list[str]]:
     signals: list[tuple[str, str]] = []
+
+    signals.extend(_branch_policy_metadata_signals())
 
     normalized_labels = _normalise_labels(labels)
     labels_set = {label.casefold() for label in normalized_labels}
