@@ -30,6 +30,12 @@ DEFAULT_TIMEOUT = 45
 DEFAULT_RETRIES = 4
 DEFAULT_PER_PAGE = 100
 
+# Safety limits for evidence collection. These prevent a malformed,
+# unexpectedly large, or changing GitHub response from causing an
+# unbounded API walk or memory growth.
+DEFAULT_MAX_PAGES = 100
+MAX_RAW_CONTENT_BYTES = 10 * 1024 * 1024
+
 _DEFAULT_BOT_LOGINS: frozenset[str] = frozenset({
     "miss-islington",
     "bedevere-bot",
@@ -42,6 +48,35 @@ _DEFAULT_BOT_LOGINS: frozenset[str] = frozenset({
     "python-cla-bot",
 })
 
+def _is_bot_login(
+    login: str,
+    bot_logins: set[str] | frozenset[str] | None = None,
+) -> bool:
+    """
+    Return whether a GitHub login should be treated as an automated actor.
+
+    GitHub bot accounts commonly use the ``[bot]`` suffix, but the triager
+    also keeps an explicit allowlist for known CPython automation accounts.
+    """
+    normalized = login.strip().lower()
+
+    if not normalized:
+        return False
+
+    known = {
+        value.strip().lower()
+        for value in (
+            bot_logins
+            if bot_logins is not None
+            else _DEFAULT_BOT_LOGINS
+        )
+    }
+
+    return (
+        normalized in known
+        or normalized.endswith("[bot]")
+        or normalized.endswith("-bot")
+    )
 
 class GitHubError(RuntimeError):
     """Raised when GitHub evidence cannot be collected."""
@@ -201,6 +236,121 @@ class GitHub:
             or str(remaining).strip() == "0"
         )
 
+    def _request_bytes(
+        self,
+        path_or_url: str,
+        *,
+        use_cache: bool = False,
+        retries: int | None = None,
+    ) -> bytes:
+        """
+        Perform one GitHub request and return the raw response bytes.
+
+        This is intentionally separate from ``request()`` because GitHub
+        endpoints can return non-JSON content, including repository source
+        files. Raw responses must never be forced through ``json.loads()``.
+        """
+        url = self._url(path_or_url)
+
+        retry_count = self.retries if retries is None else retries
+        retry_count = max(int(retry_count), 1)
+
+        for attempt in range(retry_count):
+            request = urllib.request.Request(
+                url,
+                headers=self._headers(),
+                method="GET",
+            )
+
+            try:
+                self.calls += 1
+
+                with self._opener(
+                    request,
+                    timeout=self.timeout,
+                ) as response:
+                    self._update_rate_limit(response.headers)
+                    raw = response.read()
+
+                if len(raw) > MAX_RAW_CONTENT_BYTES:
+                    raise GitHubError(
+                        "GitHub response exceeded the raw-content safety "
+                        f"limit of {MAX_RAW_CONTENT_BYTES} bytes: {url}"
+                    )
+
+                return raw
+
+            except urllib.error.HTTPError as exc:
+                self._update_rate_limit(exc.headers)
+
+                retryable = (
+                    exc.code
+                    in {
+                        408,
+                        429,
+                        500,
+                        502,
+                        503,
+                        504,
+                    }
+                    or (
+                        exc.code == 403
+                        and self._is_rate_limited(exc)
+                    )
+                )
+
+                if retryable and attempt < retry_count - 1:
+                    time.sleep(
+                        self._retry_delay(
+                            attempt,
+                            exc.headers,
+                        )
+                    )
+                    continue
+
+                raise GitHubError(
+                    self._http_error_message(exc, url)
+                ) from exc
+
+            except (urllib.error.URLError, TimeoutError) as exc:
+                if attempt < retry_count - 1:
+                    time.sleep(min(2 ** attempt, 8))
+                    continue
+
+                raise GitHubError(
+                    f"GitHub request failed: {url}: {exc}"
+                ) from exc
+
+        raise GitHubError(
+            f"GitHub request failed after retries: {url}"
+        )
+
+    def request_text(
+        self,
+        path_or_url: str,
+        *,
+        use_cache: bool = False,
+        retries: int | None = None,
+    ) -> str:
+        """
+        Fetch a non-JSON GitHub response as UTF-8 text.
+
+        Raw source retrieval deliberately does not use the JSON cache because
+        the cache format used by ``request()`` is JSON-specific.
+        """
+        raw = self._request_bytes(
+            path_or_url,
+            use_cache=use_cache,
+            retries=retries,
+        )
+
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise GitHubError(
+                f"GitHub returned non-UTF-8 text: {self._url(path_or_url)}"
+            ) from exc
+
     def request(
         self,
         path_or_url: str,
@@ -301,15 +451,30 @@ class GitHub:
         path: str,
         *,
         per_page: int = DEFAULT_PER_PAGE,
+        max_pages: int = DEFAULT_MAX_PAGES,
     ) -> list[dict[str, Any]]:
-        """Fetch every page of a GitHub list endpoint."""
+        """
+        Fetch pages from a GitHub list endpoint.
+
+        GitHub supports at most 100 items per page. The explicit page limit
+        protects the triager from an unexpectedly large or non-terminating
+        pagination sequence.
+        """
         if per_page < 1:
             raise ValueError("per_page must be at least 1")
+
+        if per_page > DEFAULT_PER_PAGE:
+            raise ValueError(
+                f"per_page cannot exceed {DEFAULT_PER_PAGE}"
+            )
+
+        if max_pages < 1:
+            raise ValueError("max_pages must be at least 1")
 
         page = 1
         result: list[dict[str, Any]] = []
 
-        while True:
+        while page <= max_pages:
             separator = "&" if "?" in path else "?"
             page_path = (
                 f"{path}{separator}"
@@ -333,6 +498,11 @@ class GitHub:
                 return result
 
             page += 1
+
+        raise GitHubError(
+            f"GitHub pagination exceeded the safety limit of "
+            f"{max_pages} pages: {path}"
+        )
 
     def pr(self, number: int) -> dict[str, Any]:
         data = self.request(f"/pulls/{number}")
@@ -383,9 +553,9 @@ class GitHub:
                 else ""
             )
 
-            is_bot = (
-                login in bot_logins
-                or login.endswith("[bot]")
+            is_bot = _is_bot_login(
+                login,
+                bot_logins,
             )
 
             ev = dict(event)
@@ -455,7 +625,7 @@ class GitHub:
             user = comment.get("user") or {}
             login = user.get("login", "?")
 
-            if login in bots:
+            if _is_bot_login(login, bots):
                 continue
 
             normalized_comments.append(
@@ -580,16 +750,24 @@ class GitHub:
             result.append(self.issue(number))
 
         return result
-
     def check_runs(
         self,
         sha: str,
         *,
         per_page: int = DEFAULT_PER_PAGE,
+        max_pages: int = DEFAULT_MAX_PAGES,
     ) -> dict[str, Any]:
-        """Fetch all check runs for a commit."""
+        """Fetch all check runs for a commit within a bounded page limit."""
         if per_page < 1:
             raise ValueError("per_page must be at least 1")
+
+        if per_page > DEFAULT_PER_PAGE:
+            raise ValueError(
+                f"per_page cannot exceed {DEFAULT_PER_PAGE}"
+            )
+
+        if max_pages < 1:
+            raise ValueError("max_pages must be at least 1")
 
         encoded_sha = urllib.parse.quote(
             sha,
@@ -600,7 +778,7 @@ class GitHub:
         runs: list[dict[str, Any]] = []
         total_count: int | None = None
 
-        while True:
+        while page <= max_pages:
             path = (
                 f"/commits/{encoded_sha}/check-runs"
                 f"?per_page={per_page}&page={page}"
@@ -638,6 +816,11 @@ class GitHub:
                 break
 
             page += 1
+        else:
+            raise GitHubError(
+                f"GitHub check-run pagination exceeded the safety "
+                f"limit of {max_pages} pages for commit {sha}"
+            )
 
         return {
             "total_count": (
@@ -698,6 +881,14 @@ class GitHub:
         path: str,
         ref: str | None = None,
     ) -> str | None:
+        """
+        Fetch repository source text at a specific ref.
+
+        The Contents API normally provides base64-encoded content for small
+        files. For larger supported files, GitHub provides a raw download URL.
+        Raw responses must be fetched as bytes/text rather than through the
+        JSON API path.
+        """
         data = self.content(path, ref)
 
         if (
@@ -705,9 +896,17 @@ class GitHub:
             and data.get("content")
         ):
             try:
-                return base64.b64decode(
-                    data["content"]
-                ).decode(
+                decoded = base64.b64decode(
+                    data["content"],
+                    validate=True,
+                )
+                if len(decoded) > MAX_RAW_CONTENT_BYTES:
+                    raise GitHubError(
+                        f"Repository file exceeds the raw-content safety "
+                        f"limit of {MAX_RAW_CONTENT_BYTES} bytes: {path}"
+                    )
+
+                return decoded.decode(
                     "utf-8",
                     errors="replace",
                 )
@@ -716,17 +915,11 @@ class GitHub:
 
         download_url = data.get("download_url")
 
-        if download_url:
-            try:
-                raw = self.request(
-                    download_url,
-                    use_cache=False,
-                )
-
-                if isinstance(raw, str):
-                    return raw
-            except GitHubError:
-                pass
+        if isinstance(download_url, str) and download_url:
+            return self.request_text(
+                download_url,
+                use_cache=False,
+            )
 
         return None
 

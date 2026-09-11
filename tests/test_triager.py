@@ -35,6 +35,42 @@ from scripts.triager.policy import (
 )
 
 
+class FakeGitHub:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def pull_request_evidence(
+        self,
+        pr_number,
+        *,
+        linked_issue_numbers=None,
+    ):
+        return {
+            "evidence": {
+                "pr": {
+                    "number": pr_number,
+                    "title": "Test PR",
+                    "body": "",
+                    "state": "open",
+                    "base": {
+                        "ref": "main",
+                        "sha": "base-sha",
+                    },
+                    "head": {
+                        "ref": "test-branch",
+                        "sha": "head-sha",
+                    },
+                },
+                "files": [],
+                "reviews": [],
+                "review_comments": [],
+                "issue_comments": [],
+                "timeline": [],
+            },
+            "errors": {},
+        }
+
+
 class TriagerTests(unittest.TestCase):
     """Tests for the orchestration layer in analyze.py."""
 
@@ -59,7 +95,10 @@ Python/* @python-team
         )
         self.assertEqual(issues, [12345, 12346])
         self.assertEqual(peps, [709])
-        self.assertIn("https://discuss.python.org/t/example/123", discussions)
+        self.assertIn(
+            "https://discuss.python.org/t/example/123",
+            discussions,
+        )
 
     def test_added_removed(self):
         added, removed = triager.added_removed(
@@ -120,7 +159,10 @@ Python/* @python-team
             ),
         }])
         rc = [f for f in findings if f.category == "REFCOUNT"]
-        self.assertTrue(rc, "Expected REFCOUNT finding for 3 INCREF 0 DECREF")
+        self.assertTrue(
+            rc,
+            "Expected REFCOUNT finding for 3 INCREF 0 DECREF",
+        )
         self.assertEqual(rc[0].severity, "LOW")
         self.assertEqual(rc[0].confidence, "low")
 
@@ -154,7 +196,10 @@ Python/* @python-team
             "patch": "@@ -0 +1 @@\n+new_rule: foo",
         }])
         grammar = [f for f in findings if f.category == "GRAMMAR"]
-        self.assertTrue(grammar, "Expected GRAMMAR finding for Grammar/ change")
+        self.assertTrue(
+            grammar,
+            "Expected GRAMMAR finding for Grammar/ change",
+        )
         self.assertIn("regen-pegen", grammar[0].message)
         self.assertIn("regen-all", grammar[0].message)
 
@@ -196,7 +241,9 @@ Python/* @python-team
         self.assertIsNone(no_match)
 
     def test_legacy_backport_label_regex(self):
-        match = LEGACY_BACKPORT_LABEL_RE.fullmatch("needs-backport-to-3.13")
+        match = LEGACY_BACKPORT_LABEL_RE.fullmatch(
+            "needs-backport-to-3.13"
+        )
         self.assertIsNotNone(match)
         self.assertEqual(match.group(1), "3.13")
 
@@ -299,33 +346,10 @@ Python/* @python-team
         self.assertEqual(subsystem, "modules/socket")
 
     def test_ai_does_not_receive_anthropic_api_key_for_gemini(self):
-        original_argv = sys.argv
-        sys.argv = [
-            "analyze.py",
-            "1",
-            "--ai",
-            "--ai-provider",
-            "gemini",
-        ]
-
-        evidence = {
-            "pr": {
-                "base": {
-                    "sha": "base-sha",
-                    "ref": "main",
-                },
-                "title": "Test PR",
-                "body": "",
-            },
-            "timeline": [],
-            "files": [],
-            "codeowners_path": None,
-            "codeowners_text": "",
-        }
-
         captured = {}
 
         def fake_synthesize(report, **kwargs):
+            captured["report"] = report
             captured["kwargs"] = kwargs
             return {
                 "triage": "READY_FOR_MAINTAINER_REVIEW",
@@ -334,59 +358,57 @@ Python/* @python-team
                 "top_risks": [],
                 "review_questions": [],
                 "expert_routing": [],
-                "process_assessment": "OK",
-                "test_assessment": "OK",
-                "backport_assessment": "OK",
+                "process_assessment": (
+                    "No additional process concern is established."
+                ),
+                "test_assessment": "Tests are present.",
+                "backport_assessment": (
+                    "No backport conclusion is established."
+                ),
                 "uncertainties": [],
             }
 
+        original = triager.ai_synthesize
         try:
-            with patch.object(triager, "fetch_pr_evidence", return_value=evidence):
+            triager.ai_synthesize = fake_synthesize
+
+            with patch.object(
+                triager,
+                "GITHUB_TOKEN",
+                "test-token",
+            ), patch.object(
+                triager,
+                "REPO",
+                "python/cpython",
+            ):
                 with patch.object(
                     triager,
-                    "fetch_linked_issues",
-                    return_value=([], [], []),
+                    "GitHub",
+                    FakeGitHub,
                 ):
-                    with patch.object(
-                        triager,
-                        "make_report",
-                        return_value={
-                            "triage": "READY_FOR_MAINTAINER_REVIEW",
-                            "findings": [],
-                        },
+                    with patch(
+                        "sys.argv",
+                        [
+                            "analyze.py",
+                            "123",
+                            "--ai",
+                            "--ai-provider",
+                            "gemini",
+                        ],
                     ):
-                        with patch.object(
-                            triager,
-                            "parse_codeowners",
-                            return_value=[],
-                        ):
-                            with patch.object(
-                                triager,
-                                "resolve_codeowners",
-                                return_value=[],
-                            ):
-                                with patch.object(
-                                    triager,
-                                    "ai_synthesize",
-                                    side_effect=fake_synthesize,
-                                ):
-                                    with patch.object(
-                                        triager,
-                                        "print_report",
-                                    ):
-                                        with patch.dict(
-                                            triager.os.environ,
-                                            {
-                                                "ANTHROPIC_API_KEY": "anthropic-secret",
-                                                "GEMINI_API_KEY": "gemini-secret",
-                                            },
-                                            clear=False,
-                                        ):
-                                            triager.main()
+                        triager.main()
         finally:
-            sys.argv = original_argv
+            triager.ai_synthesize = original
 
-        self.assertEqual(captured["kwargs"], {"provider": "gemini"})
+        self.assertEqual(
+            captured["kwargs"],
+            {
+                "provider": "gemini",
+                "model": None,
+                "timeout": None,
+            },
+        )
+        self.assertNotIn("api_key", captured["kwargs"])
 
     def test_ai_error_is_displayed_in_normal_output(self):
         original_argv = sys.argv
@@ -414,7 +436,11 @@ Python/* @python-team
         }
 
         try:
-            with patch.object(triager, "fetch_pr_evidence", return_value=evidence):
+            with patch.object(
+                triager,
+                "fetch_pr_evidence",
+                return_value=evidence,
+            ):
                 with patch.object(
                     triager,
                     "fetch_linked_issues",

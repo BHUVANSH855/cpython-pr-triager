@@ -7,9 +7,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   tests:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
     strategy:
       fail-fast: false
       matrix:
@@ -22,15 +28,28 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
+          allow-prereleases: true
+
+      - name: Show Python version
+        run: python --version
+
+      - name: Upgrade packaging tools
+        run: python -m pip install --disable-pip-version-check --upgrade pip setuptools
+
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[test]"
 
       - name: Compile Python sources
         run: python -m compileall -q scripts tests
 
+      - name: Verify pytest installation
+        run: python -m pytest --version
+
       - name: Run test suite
-        run: python -m unittest discover -s tests -v
+        run: python -m pytest -q

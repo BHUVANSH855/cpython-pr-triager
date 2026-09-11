@@ -3,6 +3,11 @@
 This module coordinates the existing GitHub evidence collectors into one
 review snapshot. It deliberately does not perform semantic analysis or AI
 synthesis.
+
+The snapshot is the deterministic boundary between GitHub collection and
+downstream analysis/reporting. Collection failures are preserved explicitly
+so downstream consumers cannot accidentally interpret incomplete evidence as
+complete evidence.
 """
 
 from __future__ import annotations
@@ -10,6 +15,55 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
+
+
+# Core evidence sources are the collectors whose failure prevents the
+# snapshot from being considered operationally complete.
+#
+# Keep this separate from the broader evidence inventory used by
+# ``completeness()``. A source can be legitimately empty without making the
+# snapshot unusable.
+CORE_EVIDENCE_SOURCES: tuple[str, ...] = (
+    "files",
+    "reviews",
+    "review_comments",
+    "issue_comments",
+    "timeline",
+    "base_file_contents",
+    "check_runs",
+    "statuses",
+)
+
+# This is the complete evidence inventory exposed by the snapshot.
+#
+# ``completeness()`` reports all of these surfaces, while ``is_complete``
+# retains its established meaning of checking the core collector failures.
+EVIDENCE_SOURCES: tuple[str, ...] = (
+    "pr",
+    "files",
+    "reviews",
+    "review_comments",
+    "issue_comments",
+    "timeline",
+    "linked_issues",
+    "base_file_contents",
+    "codeowners",
+    "check_runs",
+    "statuses",
+)
+
+OPTIONAL_EMPTY_EVIDENCE_SOURCES: frozenset[str] = frozenset(
+    {
+        "reviews",
+        "review_comments",
+        "issue_comments",
+        "timeline",
+        "linked_issues",
+        "base_file_contents",
+        "check_runs",
+        "statuses",
+    }
+)
 
 
 def _list_value(mapping: dict[str, Any], key: str) -> list[dict[str, Any]]:
@@ -36,7 +90,12 @@ def _optional_string(value: Any) -> str | None:
 
 
 def _check_runs_value(value: Any) -> dict[str, Any]:
-    """Normalize the check-runs evidence structure."""
+    """Normalize the check-runs evidence structure.
+
+    An empty check-run collection is valid evidence when GitHub successfully
+    reports zero check runs. Collector failures are represented separately in
+    ``evidence_errors`` and therefore must not be hidden here.
+    """
     if not isinstance(value, dict):
         return {
             "total_count": 0,
@@ -52,13 +111,57 @@ def _check_runs_value(value: Any) -> dict[str, Any]:
     total_count = result.get("total_count")
     if not isinstance(total_count, int):
         result["total_count"] = len(result["check_runs"])
+    else:
+        result["total_count"] = max(0, total_count)
 
     return result
 
 
+def _normalise_errors(value: Any) -> dict[str, str]:
+    """Normalize collector errors into a deterministic string mapping."""
+    if not isinstance(value, dict):
+        return {}
+
+    errors: dict[str, str] = {}
+
+    for key, message in value.items():
+        normalized_key = str(key).strip()
+
+        if not normalized_key:
+            continue
+
+        if message is None:
+            continue
+
+        errors[normalized_key] = str(message)
+
+    return errors
+
+
+def _normalise_stats(value: Any) -> dict[str, Any]:
+    """Normalize collection statistics without exposing mutable input."""
+    if not isinstance(value, dict):
+        return {}
+
+    return {
+        str(key): stat_value
+        for key, stat_value in value.items()
+        if str(key).strip()
+    }
+
+
 @dataclass
 class ReviewSnapshot:
-    """Immutable-in-practice evidence snapshot for one pull request."""
+    """Evidence snapshot for one pull request.
+
+    The object is intentionally an orchestration/data boundary rather than an
+    analysis engine. It records the evidence collected at a particular point
+    in time and preserves collection failures for downstream consumers.
+
+    The contained dictionaries/lists are copied at construction time where
+    practical, making the snapshot immutable-in-practice even though the
+    dataclass itself remains mutable for backwards compatibility.
+    """
 
     pr_number: int
     captured_at: str
@@ -99,6 +202,83 @@ class ReviewSnapshot:
         }
     )
 
+    def __post_init__(self) -> None:
+        """Validate and defensively normalize snapshot data."""
+        if not isinstance(self.pr_number, int) or self.pr_number <= 0:
+            raise ValueError("pr_number must be a positive integer")
+
+        if not isinstance(self.captured_at, str) or not self.captured_at:
+            raise ValueError("captured_at must be a non-empty string")
+
+        if not isinstance(self.repository, str) or not self.repository:
+            raise ValueError("repository must be a non-empty string")
+
+        if not isinstance(self.pr, dict):
+            raise TypeError("pr must be a dictionary")
+        self.pr = dict(self.pr)
+
+        for attr in (
+            "files",
+            "reviews",
+            "review_comments",
+            "issue_comments",
+            "timeline",
+            "linked_issues",
+            "statuses",
+        ):
+            value = getattr(self, attr)
+            if not isinstance(value, list):
+                setattr(self, attr, [])
+            else:
+                setattr(self, attr, list(value))
+
+        if not isinstance(self.base_file_contents, dict):
+            self.base_file_contents = {}
+        else:
+            self.base_file_contents = dict(self.base_file_contents)
+
+        if not isinstance(self.check_runs, dict):
+            self.check_runs = {
+                "total_count": 0,
+                "check_runs": [],
+            }
+        else:
+            self.check_runs = _check_runs_value(self.check_runs)
+
+        if self.codeowners_path is not None and not isinstance(
+            self.codeowners_path,
+            str,
+        ):
+            self.codeowners_path = None
+
+        if self.codeowners_text is not None and not isinstance(
+            self.codeowners_text,
+            str,
+        ):
+            self.codeowners_text = None
+
+        if self.head_sha is not None and not isinstance(self.head_sha, str):
+            self.head_sha = None
+
+        if self.base_sha is not None and not isinstance(self.base_sha, str):
+            self.base_sha = None
+
+        self.evidence_errors = _normalise_errors(self.evidence_errors)
+        self.collection_stats = _normalise_stats(self.collection_stats)
+
+        if not isinstance(self.references, dict):
+            self.references = {}
+
+        normalized_references: dict[str, list[Any]] = {}
+
+        for key in ("issues", "peps", "discussions"):
+            value = self.references.get(key, [])
+            normalized_references[key] = (
+                list(value) if isinstance(value, list) else []
+            )
+
+        self.references = normalized_references
+
     @classmethod
     def collect(
         cls,
@@ -112,7 +292,12 @@ class ReviewSnapshot:
         """Collect one complete PR review snapshot.
 
         Existing GitHub collection remains responsible for network access.
-        This layer owns orchestration and reference discovery.
+        This layer owns orchestration, normalization, and reference discovery.
+
+        Any collector errors returned by ``pull_request_evidence`` are
+        preserved in ``evidence_errors``. This is critical: an unavailable
+        evidence source must never silently become an apparently successful
+        empty result.
         """
         if not isinstance(number, int) or number <= 0:
             raise ValueError("number must be a positive integer")
@@ -128,6 +313,8 @@ class ReviewSnapshot:
         evidence = result.get("evidence")
         if not isinstance(evidence, dict):
             raise TypeError("pull_request_evidence() returned invalid evidence")
+
+        errors = _normalise_errors(result.get("errors"))
 
         pr = evidence.get("pr")
         if not isinstance(pr, dict):
@@ -155,14 +342,22 @@ class ReviewSnapshot:
 
         # If the caller did not explicitly provide issue identifiers, the
         # snapshot owns discovery and fetches the discovered issue evidence.
+        #
+        # A failure is retained as an evidence error rather than being
+        # converted into an apparently successful empty list.
         if linked_issue_numbers is None and references["issues"]:
             try:
                 linked_issues = gh.linked_issue_evidence_batch(
                     references["issues"],
                 )
+                if not isinstance(linked_issues, list):
+                    raise TypeError(
+                        "linked_issue_evidence_batch() must return a list"
+                    )
+                linked_issues = list(linked_issues)
             except Exception as exc:
                 linked_issues = []
-                result.setdefault("errors", {})["linked_issues"] = str(exc)
+                errors["linked_issues"] = str(exc)
 
         repository = cls._repository_name(gh, pr)
 
@@ -195,14 +390,8 @@ class ReviewSnapshot:
             head_sha=_optional_string(
                 evidence.get("head_sha") or head.get("sha"),
             ),
-            evidence_errors={
-                str(key): str(value)
-                for key, value in (result.get("errors") or {}).items()
-            },
-            collection_stats={
-                str(key): value
-                for key, value in (result.get("stats") or {}).items()
-            },
+            evidence_errors=errors,
+            collection_stats=_normalise_stats(result.get("stats")),
             references=references,
         )
 
@@ -232,6 +421,7 @@ class ReviewSnapshot:
         ):
             for item in collection:
                 body_text = item.get("body")
+
                 if isinstance(body_text, str) and body_text:
                     text_parts.append(body_text)
 
@@ -242,9 +432,9 @@ class ReviewSnapshot:
         )
 
         return {
-            "issues": issues,
-            "peps": peps,
-            "discussions": discussions,
+            "issues": list(issues),
+            "peps": list(peps),
+            "discussions": list(discussions),
         }
 
     @staticmethod
@@ -262,6 +452,7 @@ class ReviewSnapshot:
         repo_data = base.get("repo") or {}
 
         full_name = repo_data.get("full_name")
+
         if isinstance(full_name, str) and full_name:
             return full_name
 
@@ -269,38 +460,32 @@ class ReviewSnapshot:
 
     @property
     def is_complete(self) -> bool:
-        """Return whether the core PR evidence collectors all succeeded."""
-        required = {
-            "files",
-            "reviews",
-            "review_comments",
-            "issue_comments",
-            "timeline",
-            "base_file_contents",
-            "check_runs",
-            "statuses",
-        }
+        """Return whether the core PR evidence collectors all succeeded.
 
+        This deliberately preserves the established snapshot contract:
+        empty-but-valid evidence is not a collection failure. The property
+        only becomes false when one of the core collectors recorded an error.
+
+        The richer ``completeness()`` method is available when callers need
+        the full evidence inventory and diagnostic information.
+        """
         return not any(
-            key in self.evidence_errors
-            for key in required
+            source in self.evidence_errors
+            for source in CORE_EVIDENCE_SOURCES
         )
 
     def completeness(self) -> dict[str, Any]:
-        """Return a machine-readable evidence completeness summary."""
-        attempted = [
-            "pr",
-            "files",
-            "reviews",
-            "review_comments",
-            "issue_comments",
-            "timeline",
-            "linked_issues",
-            "base_file_contents",
-            "codeowners",
-            "check_runs",
-            "statuses",
-        ]
+        """Return a machine-readable evidence completeness summary.
+
+        This reports the full evidence inventory separately from
+        ``is_complete``. Empty collections are valid evidence states; explicit
+        collector errors are represented as missing evidence and retained in
+        the ``errors`` mapping.
+
+        The returned shape intentionally remains compatible with the existing
+        snapshot contract while adding a normalized ``status`` field.
+        """
+        attempted = list(EVIDENCE_SOURCES)
 
         missing = [
             source
@@ -314,12 +499,27 @@ class ReviewSnapshot:
             if source not in missing
         ]
 
+        errors = {
+            source: self.evidence_errors[source]
+            for source in self.evidence_errors
+            if source in attempted
+        }
+
+        if not missing:
+            status = "complete"
+        elif available:
+            status = "partial"
+        else:
+            status = "unavailable"
+
         return {
             "attempted": attempted,
             "available": available,
             "missing": missing,
             "complete": not missing,
+            "status": status,
             "error_count": len(self.evidence_errors),
+            "errors": errors,
         }
 
     def _source_missing(self, source: str) -> bool:
@@ -331,24 +531,38 @@ class ReviewSnapshot:
             return not bool(self.pr)
 
         if source == "codeowners":
-            return (
-                self.codeowners_path is None
-                and self.codeowners_text is None
-            )
+            # Absence of CODEOWNERS is a legitimate repository state.
+            # A collector error is handled above and therefore still marks
+            # this source unavailable.
+            return False
 
         if source == "check_runs":
+            # The GitHub collector intentionally returns an empty dictionary
+            # only when the field is genuinely malformed/missing. A normal
+            # zero-check-runs response is represented by a dictionary.
             return not isinstance(self.check_runs, dict)
 
         if source == "base_file_contents":
+            # An empty mapping is valid: added files and non-Python files may
+            # legitimately have no base content.
             return False
 
-        value = getattr(self, source, None)
-        return value is None
+        if source in OPTIONAL_EMPTY_EVIDENCE_SOURCES:
+            # Empty list evidence is valid. Only ``None`` means that the
+            # source was not represented at all.
+            return getattr(self, source, None) is None
+
+        return getattr(self, source, None) is None
 
     def to_evidence(self) -> dict[str, Any]:
-        """Return the existing report-compatible evidence shape."""
+        """Return the existing report-compatible evidence shape.
+
+        This method intentionally preserves the existing public evidence
+        structure so downstream analyzers and report serializers do not need
+        to change merely because the snapshot internals became stricter.
+        """
         return {
-            "pr": self.pr,
+            "pr": dict(self.pr),
             "files": list(self.files),
             "reviews": list(self.reviews),
             "review_comments": list(self.review_comments),
@@ -361,6 +575,7 @@ class ReviewSnapshot:
             "check_runs": dict(self.check_runs),
             "statuses": list(self.statuses),
             "head_sha": self.head_sha,
+            "base_sha": self.base_sha,
             "evidence_errors": dict(self.evidence_errors),
             "references": {
                 key: list(value)

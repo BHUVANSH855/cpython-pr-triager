@@ -9,15 +9,39 @@ description = "Evidence-based maintainer-assist tooling for CPython pull request
 requires-python = ">=3.11"
 dependencies = []
 
+[project.optional-dependencies]
+test = [
+    "pytest>=9.1,<10",
+]
+
 [project.scripts]
 cpython-pr-triager = "scripts.analyze:main"
+cpython-pr-triager-check-ci = "scripts.check_ci:main"
 
 [tool.setuptools.packages.find]
-include = ["scripts", "scripts.*"]
+include = [
+    "scripts",
+    "scripts.*",
+]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
-python_files = ["test_*.py"]
-python_classes = ["*Tests"]
+testpaths = [
+    "tests",
+]
+python_files = [
+    "test_*.py",
+]
+python_classes = [
+    "*Tests",
+]
+python_functions = [
+    "test_*",
+]
 addopts = "-v --tb=short"
-pythonpath = ["."]
+pythonpath = [
+    ".",
+]
+
+[tool.cpython-pr-triager]
+test-command = "python -m pytest -q"
+ci-check-command = "python scripts/check_ci.py"

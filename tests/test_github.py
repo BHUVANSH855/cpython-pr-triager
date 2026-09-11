@@ -33,6 +33,26 @@ class FakeResponse:
         ).encode("utf-8")
 
 
+class RawFakeResponse:
+    def __init__(
+        self,
+        payload: bytes,
+        *,
+        headers=None,
+    ):
+        self.payload = payload
+        self.headers = headers or {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self):
+        return self.payload
+
+
 def get_query_page(url: str) -> int:
     from urllib.parse import parse_qs, urlsplit
 
@@ -97,6 +117,46 @@ class GitHubTests(unittest.TestCase):
 
         self.assertEqual(
             get_query_page(requests[1]),
+            2,
+        )
+
+    def test_paginate_rejects_excessive_page_count(self):
+        requests = []
+
+        def opener(request, timeout):
+            requests.append(request.full_url)
+
+            return FakeResponse(
+                [
+                    {"id": 1},
+                    {"id": 2},
+                ]
+            )
+
+        with tempfile.TemporaryDirectory() as temp:
+            client = GitHub(
+                cache_dir=Path(temp),
+                cache_ttl=0,
+                retries=1,
+                opener=opener,
+            )
+
+            with self.assertRaises(
+                GitHubError
+            ) as context:
+                client.paginate(
+                    "/test",
+                    per_page=2,
+                    max_pages=2,
+                )
+
+        self.assertIn(
+            "pagination exceeded the safety limit of 2 pages",
+            str(context.exception),
+        )
+
+        self.assertEqual(
+            len(requests),
             2,
         )
 
@@ -387,6 +447,49 @@ class GitHubTests(unittest.TestCase):
             2,
         )
 
+    def test_check_runs_reject_excessive_page_count(self):
+        requests = []
+
+        def opener(request, timeout):
+            requests.append(request.full_url)
+
+            return FakeResponse(
+                {
+                    "total_count": 10,
+                    "check_runs": [
+                        {"name": "check"},
+                        {"name": "check-2"},
+                    ],
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as temp:
+            client = GitHub(
+                cache_dir=Path(temp),
+                cache_ttl=0,
+                retries=1,
+                opener=opener,
+            )
+
+            with self.assertRaises(
+                GitHubError
+            ) as context:
+                client.check_runs(
+                    "abc123",
+                    per_page=2,
+                    max_pages=2,
+                )
+
+        self.assertIn(
+            "check-run pagination exceeded the safety",
+            str(context.exception),
+        )
+
+        self.assertEqual(
+            len(requests),
+            2,
+        )
+
     def test_content_encodes_path_and_ref(self):
         captured = []
 
@@ -434,6 +537,109 @@ class GitHubTests(unittest.TestCase):
         self.assertIn(
             "ref=feature%2Ftest%20branch",
             captured[0],
+        )
+
+    def test_raw_content_reads_download_url_as_text(self):
+        requests = []
+
+        def opener(request, timeout):
+            url = request.full_url
+            requests.append(url)
+
+            if "/contents/large.txt" in url:
+                return FakeResponse(
+                    {
+                        "download_url": (
+                            "https://raw.githubusercontent.com/"
+                            "python/cpython/main/large.txt"
+                        ),
+                    }
+                )
+
+            if url.startswith("https://raw.githubusercontent.com/"):
+                return RawFakeResponse(
+                    b"raw file contents\n"
+                )
+
+            raise AssertionError(
+                f"Unexpected URL: {url}"
+            )
+
+        with tempfile.TemporaryDirectory() as temp:
+            client = GitHub(
+                cache_dir=Path(temp),
+                cache_ttl=0,
+                opener=opener,
+            )
+
+            text = client.raw_content(
+                "large.txt",
+                "main",
+            )
+
+        self.assertEqual(
+            text,
+            "raw file contents\n",
+        )
+
+        self.assertEqual(
+            requests,
+            [
+                (
+                    "https://api.github.com/repos/python/cpython"
+                    "/contents/large.txt?ref=main"
+                ),
+                (
+                    "https://raw.githubusercontent.com/"
+                    "python/cpython/main/large.txt"
+                ),
+            ],
+        )
+
+    def test_raw_content_rejects_oversized_download(self):
+        from scripts.triager.github import MAX_RAW_CONTENT_BYTES
+
+        def opener(request, timeout):
+            url = request.full_url
+
+            if "/contents/large.txt" in url:
+                return FakeResponse(
+                    {
+                        "download_url": (
+                            "https://raw.githubusercontent.com/"
+                            "python/cpython/main/large.txt"
+                        ),
+                    }
+                )
+
+            if url.startswith("https://raw.githubusercontent.com/"):
+                return RawFakeResponse(
+                    b"x" * (MAX_RAW_CONTENT_BYTES + 1)
+                )
+
+            raise AssertionError(
+                f"Unexpected URL: {url}"
+            )
+
+        with tempfile.TemporaryDirectory() as temp:
+            client = GitHub(
+                cache_dir=Path(temp),
+                cache_ttl=0,
+                retries=1,
+                opener=opener,
+            )
+
+            with self.assertRaises(
+                GitHubError
+            ) as context:
+                client.raw_content(
+                    "large.txt",
+                    "main",
+                )
+
+        self.assertIn(
+            "raw-content safety limit",
+            str(context.exception),
         )
 
     def test_codeowners_uses_first_available_candidate(self):
@@ -918,6 +1124,63 @@ class GitHubTests(unittest.TestCase):
                     "title": "Another issue",
                 }
             ],
+        )
+
+    def test_timeline_marks_bot_suffixes_consistently(self):
+        def opener(request, timeout):
+            url = request.full_url
+
+            if "/issues/30341/timeline?" in url:
+                return FakeResponse(
+                    [
+                        {
+                            "event": "commented",
+                            "actor": {
+                                "login": "automation-bot",
+                            },
+                            "created_at": "2022-01-03T00:00:00Z",
+                            "body": "Automated update",
+                        },
+                        {
+                            "event": "commented",
+                            "actor": {
+                                "login": "github-actions[bot]",
+                            },
+                            "created_at": "2022-01-03T00:01:00Z",
+                            "body": "GitHub automation",
+                        },
+                        {
+                            "event": "commented",
+                            "actor": {
+                                "login": "alice",
+                            },
+                            "created_at": "2022-01-03T00:02:00Z",
+                            "body": "Human update",
+                        },
+                    ]
+                )
+
+            raise urllib.error.HTTPError(
+                url,
+                404,
+                "not found",
+                {},
+                None,
+            )
+
+        with tempfile.TemporaryDirectory() as temp:
+            client = GitHub(
+                cache_dir=Path(temp),
+                cache_ttl=0,
+                retries=1,
+                opener=opener,
+            )
+
+            result = client.timeline(30341)
+
+        self.assertEqual(
+            [event["bot"] for event in result],
+            [True, True, False],
         )
 
     def test_linked_issue_evidence_batch_isolates_failures(self):

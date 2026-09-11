@@ -56,7 +56,10 @@ from scripts.triager.references import (
 from scripts.triager.references import (
     issue_refs_from_timeline as extract_timeline_issue_refs,
 )
-from scripts.triager.report import build_report
+from scripts.triager.report import (
+    _build_evidence_completeness,
+    build_report,
+)
 from scripts.triager.reviewer_activity import ReviewerActivityCache
 from scripts.triager.snapshot import ReviewSnapshot
 
@@ -64,7 +67,6 @@ REPO = os.environ.get("CPYTHON_REPO", "python/cpython")
 CACHE_DIR = Path(os.environ.get("CPYTHON_TRIAGER_CACHE", ".triager-cache"))
 CACHE_TTL = int(os.environ.get("CPYTHON_TRIAGER_CACHE_TTL", "900"))
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
 BOT_LOGINS = frozenset({
     "miss-islington",
@@ -667,6 +669,122 @@ def build_checks(gh, pr, evidence=None):
     return result
 
 
+def mergeability_signals(pr, checks):
+    """Convert deterministic CI evidence into process signals.
+
+    These signals are deliberately conservative:
+    CI failures are blockers, pending checks require maintainer attention,
+    and unavailable/erroring check evidence is reported as incomplete
+    evidence rather than being treated as success.
+    """
+    signals = []
+
+    if not isinstance(checks, dict):
+        return [
+            (
+                "WARN",
+                "CI/check evidence is unavailable; mergeability could not "
+                "be determined.",
+            )
+        ]
+
+    if not checks.get("available"):
+        reason = checks.get("reason") or "CI/check evidence is unavailable."
+        return [
+            (
+                "WARN",
+                f"Mergeability could not be determined: {reason}",
+            )
+        ]
+
+    if checks.get("checks_error"):
+        signals.append(
+            (
+                "WARN",
+                "CI check-run evidence could not be collected: "
+                f"{checks['checks_error']}",
+            )
+        )
+
+    if checks.get("status_error"):
+        signals.append(
+            (
+                "WARN",
+                "Legacy commit-status evidence could not be collected: "
+                f"{checks['status_error']}",
+            )
+        )
+
+    summary = checks.get("summary") or {}
+
+    failures = int(summary.get("failures", 0) or 0)
+    completed = int(summary.get("completed", 0) or 0)
+    check_runs = int(summary.get("check_runs", 0) or 0)
+
+    if failures:
+        signals.append(
+            (
+                "BLOCK",
+                f"{failures} completed CI check(s) reported failure; "
+                "the PR is not ready to merge until the failures are "
+                "resolved or explicitly explained.",
+            )
+        )
+
+    if check_runs and completed < check_runs:
+        pending = check_runs - completed
+        signals.append(
+            (
+                "WARN",
+                f"{pending} CI check(s) are not completed; mergeability "
+                "cannot yet be considered settled.",
+            )
+        )
+
+    legacy_status = summary.get("legacy_status")
+
+    if isinstance(legacy_status, str):
+        normalized_status = legacy_status.strip().lower()
+
+        if normalized_status in {"failure", "error"}:
+            signals.append(
+                (
+                    "BLOCK",
+                    f"Legacy commit status is {normalized_status}; "
+                    "the PR is not ready to merge.",
+                )
+            )
+        elif normalized_status in {"pending"}:
+            signals.append(
+                (
+                    "WARN",
+                    "Legacy commit status is pending; mergeability is "
+                    "not yet settled.",
+                )
+            )
+
+    if not signals:
+        if check_runs == 0 and not legacy_status:
+            signals.append(
+                (
+                    "WARN",
+                    "No CI check runs or legacy commit status were available; "
+                    "mergeability could not be established from the supplied "
+                    "evidence.",
+                )
+            )
+        else:
+            signals.append(
+                (
+                    "OK",
+                    "Available CI/check evidence contains no reported "
+                    "failure or pending check.",
+                )
+            )
+
+    return signals
+
+
 # ---------------------------------------------------------------------------
 # Report assembly
 # ---------------------------------------------------------------------------
@@ -728,13 +846,37 @@ def make_report(gh, evidence, linked_issues, experts, patterns, reviewer_activit
         },
     }
 
+    # Build CI evidence before disposition so readiness decisions are based
+    # on the same collected evidence that is exposed in the final report.
+    #
+    # ``build_checks`` reuses the existing snapshot and therefore must not
+    # issue duplicate GitHub requests when the evidence already contains
+    # check-runs/status data.
+    checks = build_checks(
+        gh,
+        evidence["pr"],
+        evidence,
+    )
+
+    # CI/mergeability signals are part of the deterministic process evidence
+    # used by disposition. A blocker must remain a blocker; missing evidence
+    # must never be silently converted into READY.
+    process.extend(
+        mergeability_signals(
+            evidence["pr"],
+            checks,
+        )
+    )
+
+    evidence_completeness = _build_evidence_completeness(
+        evidence
+    )
+
     report_disposition = policy_disposition(
         process,
         findings,
         evidence_completeness,
     )
-
-    checks = build_checks(gh, evidence["pr"], evidence)
 
     return build_report(
         repository=REPO,
@@ -866,6 +1008,23 @@ def main():
             "(default: AI_PROVIDER or anthropic)"
         ),
     )
+    parser.add_argument(
+        "--ai-model",
+        default=None,
+        help=(
+            "AI model to use when --ai is enabled "
+            "(default: AI_MODEL or the selected provider's default)"
+        ),
+    )
+    parser.add_argument(
+        "--ai-timeout",
+        type=float,
+        default=None,
+        help=(
+            "AI request timeout in seconds "
+            "(default: AI_TIMEOUT or the selected provider's default)"
+        ),
+    )
     parser.add_argument("--json", action="store_true", dest="as_json")
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--patterns", help="Historical statistics JSON")
@@ -879,6 +1038,9 @@ def main():
     parser.add_argument("--no-cache", action="store_true")
 
     args = parser.parse_args()
+
+    if args.ai_timeout is not None and args.ai_timeout <= 0:
+        parser.error("--ai-timeout must be greater than 0")
 
     global CACHE_TTL
     if args.no_cache:
@@ -959,11 +1121,15 @@ def main():
     }
 
     if args.ai:
-        # FIX (point 20): use the modular ai.synthesize() — not a local copy.
+        # AI remains downstream of deterministic evidence and disposition.
+        # Configuration is explicit CLI input when supplied; otherwise ai.py
+        # resolves the corresponding environment/provider defaults.
         try:
             report["ai_synthesis"] = ai_synthesize(
                 report,
                 provider=args.ai_provider,
+                model=args.ai_model,
+                timeout=args.ai_timeout,
             )
         except AISynthesisError as exc:
             report["ai_error"] = str(exc)
