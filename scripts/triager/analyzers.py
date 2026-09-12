@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import ast
 import re
@@ -288,6 +288,15 @@ def _add_rule_findings(
         "python-deprecation-stacklevel",
     }
 
+    def _is_c_comment_only_line(text: str) -> bool:
+        """Return whether a C-family diff line is obviously comment-only."""
+        stripped = text.lstrip()
+
+        if stripped.startswith(("//", "/*", "*/")):
+            return True
+
+        return bool(re.match(r"^\*\s", stripped))
+
     for changed in added_lines(patch):
         for rule_id, (
             pattern,
@@ -303,6 +312,13 @@ def _add_rule_findings(
                 continue
 
             if rule_id in py_notest_rules and is_test:
+                continue
+
+            if (
+                rule_id in c_only_rules
+                and is_c
+                and _is_c_comment_only_line(changed.text)
+            ):
                 continue
 
             if not re.search(pattern, changed.text):

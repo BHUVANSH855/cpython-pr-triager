@@ -1,1 +1,1 @@
-﻿"""CPython PR triager package."""
+"""CPython PR triager package."""

@@ -581,8 +581,8 @@ def process_signals(pr, files, timeline, labels, patterns):
     return policy_process_signals(pr, files, timeline, labels, patterns)
 
 
-def disposition(process, findings):
-    return policy_disposition(process, findings)
+def disposition(process, findings, evidence=None):
+    return policy_disposition(process, findings, evidence)
 
 
 # ---------------------------------------------------------------------------

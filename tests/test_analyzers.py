@@ -65,6 +65,46 @@ class CRulesTests(unittest.TestCase):
         ids = [f.rule_id for f in findings]
         self.assertIn("c-raw-free", ids)
 
+    def test_free_in_c_comment_is_not_flagged(self):
+        """C-only rules should ignore obvious comment-only lines."""
+        findings = analyze_patch(
+            "Objects/foo.c",
+            "@@ -0 +1 @@\n"
+            "+/* We previously used free() here; now use PyMem_Free(). */",
+        )
+        ids = [f.rule_id for f in findings]
+        self.assertNotIn("c-raw-free", ids)
+
+    def test_free_in_line_comment_is_not_flagged(self):
+        """C-only rules should ignore // comment-only lines."""
+        findings = analyze_patch(
+            "Objects/foo.c",
+            "@@ -0 +1 @@\n"
+            "+// free(ptr) would bypass the CPython allocator.",
+        )
+        ids = [f.rule_id for f in findings]
+        self.assertNotIn("c-raw-free", ids)
+
+    def test_free_in_block_comment_continuation_is_not_flagged(self):
+        """C-only rules should ignore obvious block-comment continuations."""
+        findings = analyze_patch(
+            "Objects/foo.c",
+            "@@ -0 +1 @@\n"
+            "+ * free(ptr) was used by the old implementation.",
+        )
+        ids = [f.rule_id for f in findings]
+        self.assertNotIn("c-raw-free", ids)
+
+    def test_free_in_pointer_expression_is_still_flagged(self):
+        """A leading unary * must not make real C code look like a comment."""
+        findings = analyze_patch(
+            "Objects/foo.c",
+            "@@ -0 +1 @@\n"
+            "+*ptr = free(ptr);",
+        )
+        ids = [f.rule_id for f in findings]
+        self.assertIn("c-raw-free", ids)
+
     def test_realloc_high(self):
         """FIX (point 13)."""
         findings = analyze_patch("Objects/foo.c", "@@ -0 +1 @@\n+ptr = realloc(ptr, 128);")

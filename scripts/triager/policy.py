@@ -1,4 +1,4 @@
-﻿"""
+"""
 Deterministic policy decisions for CPython PR triage.
 """
 

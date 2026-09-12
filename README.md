@@ -145,9 +145,21 @@ $env:ANTHROPIC_MODEL="claude-opus-5"
 - test coverage signals
 - review state (approvals, change requests, stale PRs)
 - maintenance-branch policy signals
-  - 3.10 is **security-fix-only** — bug and feature PRs are blocked
-  - 3.11–3.13 stable — only bug fixes
-  - 3.14 prerelease — features allowed carefully
+  - CPython branch lifecycle is evaluated from the repository's branch-policy
+    snapshot rather than inferred from version numbers:
+
+    | Branch | Current lifecycle status |
+    |--------|--------------------------|
+    | `main` | Feature development |
+    | `3.15` | Prerelease |
+    | `3.14` | Bugfix / maintenance |
+    | `3.13` | Bugfix / maintenance |
+    | `3.12` | Security-fix-only |
+    | `3.11` | Security-fix-only |
+    | `3.10` | Security-fix-only |
+  - The analyzer treats these statuses as policy evidence and emits a review
+    signal when a PR's labels or target branch appear inconsistent with the
+    current lifecycle policy.
 - `needs-backport-to-X.Y` label detection (hyphenated format)
 - current CI/check state
 
