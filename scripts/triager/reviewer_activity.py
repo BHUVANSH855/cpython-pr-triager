@@ -162,6 +162,18 @@ class ReviewerActivity:
     # Whether this is fresh data or from cache/fallback
     from_cache: bool = False
 
+    # Whether at least one of the two source endpoints was successfully
+    # queried. False only when *both* failed, meaning there is no usable
+    # signal at all — in that case total_reviews=0 must NOT be read as
+    # "this reviewer has no recent activity." See `error`.
+    available: bool = True
+
+    # Set whenever any part of collection failed — even if `available`
+    # is still True because the other endpoint succeeded. A human-
+    # readable description of what failed, for transparency; not parsed
+    # by any other code.
+    error: str | None = None
+
     def is_stale(self, ttl_seconds: float = 86400.0) -> bool:
         """Return whether this activity data has expired."""
         return (time.time() - self.fetched_at) > ttl_seconds
@@ -179,6 +191,8 @@ class ReviewerActivity:
             "active_subsystems": self.active_subsystems,
             "fetched_at": self.fetched_at,
             "from_cache": self.from_cache,
+            "available": self.available,
+            "error": self.error,
         }
 
     @classmethod
@@ -195,6 +209,8 @@ class ReviewerActivity:
             active_subsystems=data.get("active_subsystems", []),
             fetched_at=data.get("fetched_at", 0.0),
             from_cache=True,
+            available=data.get("available", True),
+            error=data.get("error"),
         )
 
 
@@ -327,6 +343,11 @@ class ReviewerActivityCache:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             activity = ReviewerActivity.from_dict(data)
+            # A previously-failed fetch is never treated as a usable
+            # cache hit — it gets retried on the next call instead of
+            # being frozen as "zero activity" for the full TTL window.
+            if not activity.available:
+                return None
             if not activity.is_stale(self._ttl):
                 return activity
         except Exception:
@@ -334,6 +355,11 @@ class ReviewerActivityCache:
         return None
 
     def _save_to_disk(self, activity: ReviewerActivity) -> None:
+        if not activity.available:
+            # Don't persist a failed fetch — a transient network/API
+            # error should not get frozen as "confirmed zero activity"
+            # for the next 24 hours. Let the next call retry cleanly.
+            return
         try:
             self._cache_dir.mkdir(parents=True, exist_ok=True)
             path = self._cache_path(activity.username)
@@ -361,6 +387,7 @@ class ReviewerActivityCache:
         # Fetch recent pull request review comments (inline comments)
         all_comments: list[dict[str, Any]] = []
         all_reviews: list[dict[str, Any]] = []
+        errors: list[str] = []
 
         try:
             # Pull review comments across all recent PRs
@@ -387,8 +414,8 @@ class ReviewerActivityCache:
                 if page > 5:  # max 500 comments scanned
                     break
 
-        except Exception:
-            pass
+        except Exception as exc:
+            errors.append(f"review comments: {exc}")
 
         try:
             # Fetch issue comments (PR-level review comments, not inline)
@@ -414,10 +441,19 @@ class ReviewerActivityCache:
                 if page > 3:
                     break
 
-        except Exception:
-            pass
+        except Exception as exc:
+            errors.append(f"issue comments: {exc}")
 
-        return _build_activity_from_reviews(username, all_comments, all_reviews)
+        activity = _build_activity_from_reviews(username, all_comments, all_reviews)
+        if errors:
+            # A failed fetch must never look identical to "we checked and
+            # found genuinely zero activity" — see the reviewer-activity
+            # audit finding in CHANGELOG.md. Both endpoints failing means
+            # we have no usable data at all; one failing still leaves a
+            # partial (and therefore honestly-labeled) result.
+            activity.available = len(errors) < 2
+            activity.error = "; ".join(errors)
+        return activity
 
     def get(
         self,
@@ -447,11 +483,13 @@ class ReviewerActivityCache:
         # Fetch from GitHub
         try:
             activity = self._fetch_from_github(clean)
-        except Exception:
+        except Exception as exc:
             activity = ReviewerActivity(
                 username=clean,
                 fetched_at=time.time(),
                 from_cache=False,
+                available=False,
+                error=str(exc),
             )
 
         self._memory[clean] = activity

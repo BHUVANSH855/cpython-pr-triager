@@ -1,11 +1,11 @@
 # Changelog
 
-This project has been through two external audit passes so far. This file
+This project has been through three external audit passes so far. This file
 tracks what was actually fixed in response to each, using the audits' own
 item IDs, so a reviewer can check specific claims against the diff instead
 of taking a summary on faith.
 
-Both audits are LLM-generated documents supplied by the maintainer, not
+All three audits are LLM-generated documents supplied by the maintainer, not
 independent human review — they are treated here as a checklist to verify
 against the code, not as ground truth. Several claims in the second audit
 (e.g. specific coverage percentages, the `.github/workflows` omission)
@@ -145,7 +145,7 @@ testing surfaced this on its own.
   branch, so it predates this audit process, but it wasn't verified via
   `git blame` — stated here as "not one of ours," not as a verified fact.
 
-  **Why 656/656 passing tests and 90% coverage didn't catch it:** every
+  **Why 661/661 passing tests and 90% coverage didn't catch it:** every
   single test in `test_report.py` that exercises `build_report()` with a
   `checks` argument used `"failures": 0`, so the `if failures:` branch
   containing the bug was never executed by the test suite at all. This is
@@ -198,11 +198,76 @@ This is the first real signal that the deterministic report path has now
 actually been exercised against live, non-synthetic GitHub API responses,
 and it immediately found something the test suite missed. That's a
 point in favor of continuing to run this against more real PRs — do not
-treat "656 tests pass" as equivalent to "this works," a point this file
+treat "661 tests pass" as equivalent to "this works," a point this file
 has made before and is now making with a concrete example instead of
 just a warning.
 
-## Round 4 — real accuracy bug found by reading real PR output closely (not just checking for crashes)
+## Round 5 — response to `CPython_PR_Triager_Latest_Deep_Audit.md` (third audit)
+
+This audit independently re-verified Rounds 1–4: 661 tests passed, 91%
+coverage, `check_ci.py` passed, and it confirmed the ZIP now includes
+`.github/workflows/`. It attempted a live run against PR #157349 but the
+sandbox it ran in had no DNS resolution for `api.github.com` — an
+environment limitation on its end, not a project regression. Its scorecard
+(8.7/10) and its "YES — assisted/manual mode" verdict for the CLI, "NO —
+not authoritative" for the browser, and "YES — advisory" for AI all match
+this project's own stated position, so no correction was needed there.
+
+### Fixed
+
+- **P1-08 — reviewer-activity fetch failures looked identical to "checked,
+  found zero activity."** Verified directly in the code before fixing (not
+  just taken on the audit's word): `ReviewerActivityCache._fetch_from_github`
+  had two separate `except Exception: pass` blocks, and `.get()` had a
+  third, all converging on returning a plain, empty `ReviewerActivity`
+  (`total_reviews=0`, `approval_rate=None`) on *any* failure — a network
+  error, a rate limit, anything. That empty result was then written to the
+  24-hour disk cache, meaning a single transient failure could get frozen
+  and presented as "confirmed zero activity" for the next day.
+
+  Fixed by adding `available: bool` and `error: str | None` to
+  `ReviewerActivity`, distinguishing "both source endpoints failed, no
+  usable signal" from "one endpoint failed but the other gave a real,
+  partial result." Failed fetches are no longer persisted to disk (so the
+  very next call retries instead of reusing a frozen failure), and
+  `ExpertContext` now carries `activity_unavailable`/`activity_error`
+  through to the report and CLI, which prints an explicit
+  `Activity: UNAVAILABLE (collection failed: ...)` line instead of silent
+  blankness.
+
+  Added a `test_github_failure_returns_empty_activity` upgrade plus three
+  new tests (`test_github_failure_returns_empty_activity_marked_unavailable`,
+  `test_failed_fetch_is_retried_next_call_not_frozen`,
+  `test_partial_failure_still_reports_available_with_error`) and two
+  report-level tests. Verified all four would have caught the original bug
+  by reverting the fix and confirming they fail with the exact old
+  (silently-empty) behavior, then re-applying and confirming all pass.
+
+### Explicitly not attempted this round, with reasons (repeats from prior
+rounds, still true)
+
+- **P0-01 (single canonical analyzer)** — the web UI has no backend;
+  unifying it with the Python engine needs a server component this project
+  doesn't have.
+- **P0-02 (per-source COMPLETE/EMPTY/PARTIAL/SAMPLED/FAILED/UNAVAILABLE
+  status model)** — a real, correctly-identified gap (the audit is right
+  that "successfully collected but intentionally capped" and "genuinely
+  complete" are currently conflated), but a full schema migration touches
+  many call sites and tests; still deliberately deferred rather than
+  rushed into this session.
+- **P0-03 (review-thread resolution state)** — requires a GitHub GraphQL
+  collector and an authenticated token; not implementable or testable in
+  this sandbox.
+- **P0-04/P0-05 (100+ real-PR benchmark corpus, per-rule precision
+  measurement)** — requires live GitHub API access this sandbox does not
+  have. This is the single most important remaining gap in the whole
+  project, and no amount of further code editing here substitutes for it.
+- P1-13 (snapshot replay), P2 items (rule registry, `src/` layout, ruff/
+  mypy/bandit CI, coverage gate) — real, reasonable, lower-urgency
+  engineering-quality work not attempted due to time, not because they're
+  unimportant.
+
+
 
 ### Fixed
 
@@ -264,12 +329,12 @@ just a warning.
   judgment call rather than deduplicated outright. Worth revisiting if a
   maintainer using the tool finds it noisy in practice.
 
-## Known, currently-accepted limitations (as of Round 4)
+## Known, currently-accepted limitations (as of Round 5)
 
 - The web UI (`index.html`) remains a separate, smaller implementation of
   the analysis rules from the Python CLI. Treat the CLI as authoritative;
   the web UI as a quick-look/demo tool. See `README.md`.
-- No real-world CPython PR benchmark exists yet. All 656 tests passing
+- No real-world CPython PR benchmark exists yet. All 661 tests passing
   and ~90% coverage demonstrate the implementation matches its own test
   fixtures — they do not demonstrate triage accuracy against real CPython
   PRs. Do not treat either number as evidence of the latter. (Round 3's

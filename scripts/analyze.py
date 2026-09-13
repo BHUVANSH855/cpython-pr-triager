@@ -996,7 +996,10 @@ def print_report(report, quiet=False):
             rate = expert.get("approval_rate")
             n = expert.get("approval_rate_sample_size") or 0
             resp = expert.get("typical_response_days")
-            if rate is not None or resp is not None or n:
+            if expert.get("activity_unavailable"):
+                reason = expert.get("activity_error") or "unknown error"
+                print(f"    Activity: UNAVAILABLE (collection failed: {reason}) — this is NOT evidence of zero activity.")
+            elif rate is not None or resp is not None or n:
                 parts = []
                 if rate is not None:
                     parts.append(f"approval rate {rate:.0%} (n={n}, from recent live activity)")

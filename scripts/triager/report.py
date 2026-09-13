@@ -395,13 +395,23 @@ def _build_expert_contexts(
         approval_rate: float | None = None
         approval_rate_sample_size: int = 0
         sample_phrases: list[str] = []
+        activity_unavailable = False
+        activity_error: str | None = None
 
         if reviewer_activity_cache is not None:
             try:
                 activity = reviewer_activity_cache.get(username)
-                approval_rate = activity.approval_rate
-                approval_rate_sample_size = activity.approval_rate_sample_size
-                sample_phrases = activity.sample_phrases[:6]
+                if activity.available:
+                    approval_rate = activity.approval_rate
+                    approval_rate_sample_size = activity.approval_rate_sample_size
+                    sample_phrases = activity.sample_phrases[:6]
+                else:
+                    # Collection failed outright (both source endpoints
+                    # errored) — must not be presented as "checked, found
+                    # nothing." Surface the failure instead of silently
+                    # showing the same blank state a real zero would.
+                    activity_unavailable = True
+                    activity_error = activity.error
 
                 concern_labels = {
                     "needs_test": "typically requests a regression test",
@@ -436,6 +446,8 @@ def _build_expert_contexts(
             approval_rate_sample_size=approval_rate_sample_size,
             typical_response_days=typical_response_days,
             sample_phrases=sample_phrases,
+            activity_unavailable=activity_unavailable,
+            activity_error=activity_error,
         ))
 
     return result

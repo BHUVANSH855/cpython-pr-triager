@@ -625,6 +625,13 @@ class ExpertContext:
     approval_rate_sample_size: int = 0
     sample_phrases: list[str] = field(default_factory=list)
 
+    # True when live activity collection failed outright (not merely
+    # "found nothing"). When True, approval_rate/dynamic_concerns/
+    # sample_phrases are empty because we don't know, not because the
+    # reviewer has no activity — see reviewer_activity.py.
+    activity_unavailable: bool = False
+    activity_error: str | None = None
+
     def __post_init__(self) -> None:
         if not isinstance(self.owner, str):
             raise TypeError(
@@ -716,6 +723,8 @@ class ExpertContext:
             "approval_rate": self.approval_rate,
             "approval_rate_sample_size": self.approval_rate_sample_size,
             "sample_phrases": list(self.sample_phrases),
+            "activity_unavailable": self.activity_unavailable,
+            "activity_error": self.activity_error,
             "all_concerns": self.all_concerns,
         }
 

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from scripts.triager.report import (
     _build_evidence_counts,
+    _build_expert_contexts,
     _build_historical_context,
     build_report,
 )
@@ -792,3 +793,40 @@ class ReportAssemblyTests:
             "Objects/object.c"
         )
         assert report["historical_context"]["size_baseline"]["sample_size"] == 1
+
+
+
+def _expert_match(owner="alice"):
+    return {"owner": owner, "file": "Objects/listobject.c", "pattern": "Objects/*", "line": 1}
+
+
+def test_build_expert_contexts_surfaces_activity_unavailable():
+    class FailingCache:
+        def get(self, username):
+            from scripts.triager.reviewer_activity import ReviewerActivity
+            return ReviewerActivity(
+                username=username,
+                available=False,
+                error="both endpoints failed: rate limited",
+            )
+
+    contexts = _build_expert_contexts([_expert_match()], FailingCache())
+    assert len(contexts) == 1
+    ctx = contexts[0].as_dict()
+    assert ctx["activity_unavailable"] is True
+    assert "rate limited" in ctx["activity_error"]
+    # A failure must not be presented as a real, confirmed zero.
+    assert ctx["approval_rate"] is None
+    assert ctx["approval_rate_sample_size"] == 0
+
+
+def test_build_expert_contexts_normal_case_has_no_unavailable_flag():
+    class WorkingCache:
+        def get(self, username):
+            from scripts.triager.reviewer_activity import ReviewerActivity
+            return ReviewerActivity(username=username, available=True)
+
+    contexts = _build_expert_contexts([_expert_match()], WorkingCache())
+    ctx = contexts[0].as_dict()
+    assert ctx["activity_unavailable"] is False
+    assert ctx["activity_error"] is None

@@ -193,6 +193,65 @@ class ReviewerActivityCacheTests(unittest.TestCase):
         activity = cache.get("markshannon")
         self.assertFalse(activity.from_cache)
 
+    def test_github_failure_returns_empty_activity_marked_unavailable(self):
+        """Regression test: a failed fetch used to be indistinguishable
+        from a real, successful "this reviewer has zero recent activity"
+        result — both produced total_reviews=0 with no other signal. See
+        CHANGELOG.md. A caller must be able to tell these apart via
+        `available`/`error`, and a failed fetch must never be persisted
+        to disk as if it were confirmed data (it would otherwise be
+        frozen as "zero activity" for the full cache TTL)."""
+        self.gh.request.side_effect = Exception("rate limited")
+        cache = ReviewerActivityCache(self.gh, cache_dir=self.tmpdir, ttl=3600)
+        activity = cache.get("markshannon")
+
+        self.assertIsInstance(activity, ReviewerActivity)
+        self.assertEqual(activity.total_reviews, 0)
+        self.assertFalse(activity.available)
+        self.assertIn("rate limited", activity.error)
+
+        # And it must not have been cached to disk as if it were real.
+        cache_path = cache._cache_path("markshannon")
+        self.assertFalse(cache_path.exists())
+
+    def test_failed_fetch_is_retried_next_call_not_frozen(self):
+        """A failed fetch is not persisted, so the very next call (even
+        with the same short-lived cache instance) retries rather than
+        returning the same stale failure."""
+        call_count = {"n": 0}
+
+        def flaky_request(path):
+            call_count["n"] += 1
+            raise Exception("boom")
+
+        self.gh.request.side_effect = flaky_request
+        cache = ReviewerActivityCache(self.gh, cache_dir=self.tmpdir, ttl=3600)
+        cache.get("markshannon")
+        first_calls = call_count["n"]
+        cache._memory.clear()  # simulate a fresh process picking up disk cache
+        cache.get("markshannon")
+        # Since nothing was persisted, the second call must hit the
+        # network again rather than silently reusing a cached failure.
+        self.assertGreater(call_count["n"], first_calls)
+
+    def test_partial_failure_still_reports_available_with_error(self):
+        """If only ONE of the two source endpoints fails, the reviewer
+        may still have a partial, honestly-labeled signal rather than
+        being marked fully unavailable."""
+
+        def one_endpoint_fails(path):
+            if "/pulls/comments" in path:
+                raise Exception("pulls/comments down")
+            return []
+
+        self.gh.request.side_effect = one_endpoint_fails
+        cache = ReviewerActivityCache(self.gh, cache_dir=self.tmpdir, ttl=3600)
+        activity = cache.get("markshannon")
+
+        self.assertTrue(activity.available)
+        self.assertIsNotNone(activity.error)
+        self.assertIn("pulls/comments", activity.error)
+
     def test_github_failure_returns_empty_activity(self):
         self.gh.request.side_effect = Exception("rate limited")
         cache = ReviewerActivityCache(self.gh, cache_dir=self.tmpdir, ttl=3600)
