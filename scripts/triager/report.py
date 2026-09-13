@@ -393,12 +393,14 @@ def _build_expert_contexts(
         # Dynamic activity (optional — gracefully skipped if unavailable)
         dynamic_concerns: list[str] = []
         approval_rate: float | None = None
+        approval_rate_sample_size: int = 0
         sample_phrases: list[str] = []
 
         if reviewer_activity_cache is not None:
             try:
                 activity = reviewer_activity_cache.get(username)
                 approval_rate = activity.approval_rate
+                approval_rate_sample_size = activity.approval_rate_sample_size
                 sample_phrases = activity.sample_phrases[:6]
 
                 concern_labels = {
@@ -431,6 +433,7 @@ def _build_expert_contexts(
             focus_keywords=focus_keywords,
             dynamic_concerns=dynamic_concerns,
             approval_rate=approval_rate,
+            approval_rate_sample_size=approval_rate_sample_size,
             typical_response_days=typical_response_days,
             sample_phrases=sample_phrases,
         ))
@@ -492,6 +495,8 @@ def _normalise_check_models(checks: Mapping[str, Any]) -> CheckSummary:
         pending=_safe_int(pending),
         legacy_status=str(summary["legacy_status"]) if summary.get("legacy_status") is not None else None,
         error=str(summary["error"]) if summary.get("error") is not None else None,
+        pr_head_sha=str(summary["pr_head_sha"]) if summary.get("pr_head_sha") is not None else None,
+        ci_fresh=summary.get("ci_fresh") if isinstance(summary.get("ci_fresh"), bool) else None,
     )
 
 

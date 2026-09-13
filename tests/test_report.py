@@ -612,6 +612,8 @@ class ReportAssemblyTests:
             "pending": 0,
             "legacy_status": None,
             "error": None,
+            "pr_head_sha": None,
+            "ci_fresh": None,
         }
 
     def test_raw_checks_do_not_replace_canonical_check_summaries(self):
@@ -658,6 +660,8 @@ class ReportAssemblyTests:
             "pending": 0,
             "legacy_status": None,
             "error": None,
+            "pr_head_sha": None,
+            "ci_fresh": None,
         }
 
     def test_report_metadata_cannot_overwrite_canonical_fields(self):
@@ -685,6 +689,8 @@ class ReportAssemblyTests:
             "pending": 0,
             "legacy_status": None,
             "error": None,
+            "pr_head_sha": None,
+            "ci_fresh": None,
         }
         assert report["metadata"]["custom"] == "preserved"
 

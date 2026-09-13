@@ -468,7 +468,7 @@ body:before{opacity:.025!important;background-size:44px 44px!important}
   <span class="ver">v5 &middot; Timeline + Signal Intelligence</span>
 </div>
 <p class="sub">
-  Fetches the <strong>full PR timeline</strong> (every label change, comment, review, cross-reference) + <strong>linked issue full history</strong> + <strong>discuss.python.org threads</strong> + <strong>CODEOWNERS expert routing</strong> (from actual <code>.github/CODEOWNERS</code>) + <strong>label signal analysis</strong> &mdash; then synthesises as an experienced CPython maintainer.
+  Fetches the <strong>PR timeline</strong> (label changes, comments, reviews, cross-references — first page per endpoint, see evidence-completeness notice below) + <strong>linked issue history</strong> + <strong>discuss.python.org threads</strong> + <strong>CODEOWNERS expert routing</strong> (from actual <code>.github/CODEOWNERS</code>) + <strong>label signal analysis</strong> &mdash; then runs the same deterministic static-analysis rules as the CLI, entirely in your browser. No AI model is called by this page; see the Python CLI's <code>--ai</code> flag for optional LLM synthesis.
 </p>
 <div class="irow">
   <input type="text" id="pri" placeholder="PR number or github.com/python/cpython/pull/&hellip;" />
@@ -943,7 +943,7 @@ const STEPS=[
   {id:'disc', lbl:'discuss.python.org'},
   {id:'br',   lbl:'Multi-branch backport check'},
   {id:'sta',  lbl:'Static analysis engine'},
-  {id:'ai',   lbl:'Deep AI synthesis'},
+  {id:'ai',   lbl:'Deterministic assessment (no LLM call in browser mode)'},
 ];
 let SS={};
 function initPipe(){SS={};STEPS.forEach(s=>SS[s.id]={st:'idle',cnt:''});renderPipe();}
@@ -971,13 +971,28 @@ function refs(txt=''){return{
 const BOTS=new Set(['miss-islington','bedevere-bot','github-actions[bot]','python-triage-bot','dependabot[bot]']);
 
 async function fetchTimeline(num){
-  // Fetch issue timeline (labels, events) + comments + reviews + inline review comments in parallel
+  // Fetch issue timeline (labels, events) + comments + reviews + inline review comments in parallel.
+  // NOTE: this browser tool fetches exactly ONE page per endpoint (no
+  // follow-up requests for further pages). If a PR has more items than the
+  // per_page value below, everything after the first page is silently
+  // absent from this report. We record that possibility in
+  // window.__evidencePartial so the UI can show an honest "partial
+  // evidence" notice instead of implying full coverage. The Python CLI
+  // (scripts/analyze.py) paginates completely and does not have this
+  // limitation — use it when you need a guarantee of complete evidence.
+  const TL_PP=100, CMT_PP=50, REV_PP=50, RCMT_PP=50;
   const [tl,cmts,reviews,rcmts]=await Promise.all([
-    ghSafe(`/issues/${num}/timeline?per_page=100`),
-    ghSafe(`/issues/${num}/comments?per_page=50`),
-    ghSafe(`/pulls/${num}/reviews?per_page=50`),
-    ghSafe(`/pulls/${num}/comments?per_page=50`),
+    ghSafe(`/issues/${num}/timeline?per_page=${TL_PP}`),
+    ghSafe(`/issues/${num}/comments?per_page=${CMT_PP}`),
+    ghSafe(`/pulls/${num}/reviews?per_page=${REV_PP}`),
+    ghSafe(`/pulls/${num}/comments?per_page=${RCMT_PP}`),
   ]);
+  window.__evidencePartial=window.__evidencePartial||[];
+  if((tl||[]).length>=TL_PP) window.__evidencePartial.push({source:'issue timeline',fetched:tl.length});
+  if((cmts||[]).length>=CMT_PP) window.__evidencePartial.push({source:'issue comments',fetched:cmts.length});
+  if((reviews||[]).length>=REV_PP) window.__evidencePartial.push({source:'PR reviews',fetched:reviews.length});
+  if((rcmts||[]).length>=RCMT_PP) window.__evidencePartial.push({source:'inline review comments',fetched:rcmts.length});
+  if((rcmts||[]).length>20) window.__evidencePartial.push({source:'inline review comments (display cap)',fetched:20,of:rcmts.length});
   const items=[];
   // Events from timeline (labels, merge, close, cross-refs, assignments, milestones)
   for(const ev of (tl||[])){
@@ -1054,6 +1069,7 @@ async function run(){
   clearErr();if(!num){showErr('Enter a CPython PR number or URL.');return;}
   const btn=$('gobtn');btn.disabled=true;
   $('maina').innerHTML='';initPipe();
+  window.__evidencePartial=[];
   const ctx={num};
   try{
     setStep('pr','run');
@@ -1067,30 +1083,47 @@ async function run(){
     setStep('tl','done',`${humanTL.length} events`);
 
     setStep('files','run');
-    const files=await ghSafe(`/pulls/${num}/files?per_page=100`)||[];ctx.files=files;
+    const FILES_PP=100;
+    const files=await ghSafe(`/pulls/${num}/files?per_page=${FILES_PP}`)||[];ctx.files=files;
+    if(files.length>=FILES_PP){
+      window.__evidencePartial.push({source:'changed files',fetched:files.length,reason:`GitHub per_page=${FILES_PP} cap reached — this PR may have more changed files than shown; subsystem routing, CODEOWNERS, and static-analysis findings below only cover the files actually fetched.`});
+    }
     const adds=files.reduce((s,f)=>s+f.additions,0),dels=files.reduce((s,f)=>s+f.deletions,0);
     setStep('files','done',`${files.length}f`);
 
     setStep('hist','run');
-    const top=[...files].sort((a,b)=>(b.changes||0)-(a.changes||0)).slice(0,5);
+    const HIST_TOP_FILES=5, HIST_COMMITS_PER_FILE=10;
+    const top=[...files].sort((a,b)=>(b.changes||0)-(a.changes||0)).slice(0,HIST_TOP_FILES);
+    if(files.length>HIST_TOP_FILES){
+      window.__evidencePartial.push({source:'file git history',fetched:HIST_TOP_FILES,of:files.length,reason:`only the ${HIST_TOP_FILES} files with the largest diffs get history lookups, and each is capped at ${HIST_COMMITS_PER_FILE} commits — this is a browser performance guard, not a complete history.`});
+    }
     const hist={};
     for(const f of top){
-      const cs=await ghSafe(`/commits?path=${encodeURIComponent(f.filename)}&per_page=10&sha=${selBr}`)||[];
-      if(cs.length)hist[f.filename]=cs.slice(0,10).map(c=>({sha:c.sha.slice(0,8),msg:(c.commit?.message||'').split('\n')[0].slice(0,110),author:c.commit?.author?.name||'?',date:(c.commit?.author?.date||'').slice(0,10)}));
+      const cs=await ghSafe(`/commits?path=${encodeURIComponent(f.filename)}&per_page=${HIST_COMMITS_PER_FILE}&sha=${selBr}`)||[];
+      if(cs.length)hist[f.filename]=cs.slice(0,HIST_COMMITS_PER_FILE).map(c=>({sha:c.sha.slice(0,8),msg:(c.commit?.message||'').split('\n')[0].slice(0,110),author:c.commit?.author?.name||'?',date:(c.commit?.author?.date||'').slice(0,10)}));
     }
     ctx.hist=hist;
     setStep('hist','done',`${Object.values(hist).reduce((s,a)=>s+a.length,0)} commits`);
 
     setStep('issue','run');
+    const ISSUE_CAP=4;
     const allTxt=prTxt+'\n'+humanTL.filter(x=>x.body).map(x=>x.body).join('\n');
     const allRefs=refs(allTxt);ctx.refs=allRefs;
     const issNums=[...new Set([...refs(prTxt).issues,...allRefs.issues])].filter(i=>i!==num);
+    if(issNums.length>ISSUE_CAP){
+      window.__evidencePartial.push({source:'linked issues',fetched:ISSUE_CAP,of:issNums.length,reason:'only the first few referenced issues are fetched in browser mode.'});
+    }
     const issueCtx=await fetchIssueHistory(issNums);ctx.issues=issueCtx;
     setStep('issue','done',`${issueCtx.length} issues`);
 
     setStep('peps','run');
+    const PEP_CAP=6;
     const filePeps=refs(files.map(f=>f.filename).join('\n')).peps;
-    const allPeps=[...new Set([...allRefs.peps,...filePeps])].slice(0,6);
+    const allPepsFull=[...new Set([...allRefs.peps,...filePeps])];
+    const allPeps=allPepsFull.slice(0,PEP_CAP);
+    if(allPepsFull.length>PEP_CAP){
+      window.__evidencePartial.push({source:'PEP references',fetched:PEP_CAP,of:allPepsFull.length});
+    }
     const peps=[];
     for(const p of allPeps){
       try{const r=await fetch(`https://peps.python.org/api/peps/${p}/`);if(r.ok){const d=await r.json();peps.push({num:p,title:d.title,status:d.status,type:d.type,pyver:d.python_version,url:`https://peps.python.org/pep-${String(p).padStart(4,'0')}/`});}}catch{}
@@ -1099,8 +1132,12 @@ async function run(){
     setStep('peps','done',peps.length?`${peps.length} PEPs`:'none');
 
     setStep('disc','run');
+    const DISC_CAP=4;
     const discuss=[];
-    for(const slug of allRefs.discs.slice(0,4)){
+    if(allRefs.discs.length>DISC_CAP){
+      window.__evidencePartial.push({source:'discuss.python.org threads',fetched:DISC_CAP,of:allRefs.discs.length});
+    }
+    for(const slug of allRefs.discs.slice(0,DISC_CAP)){
       try{const r=await fetch(`https://discuss.python.org/t/${slug}.json`);if(r.ok){const d=await r.json();discuss.push({title:d.title,posts:d.posts_count,views:d.views,url:`https://discuss.python.org/t/${slug}`,excerpt:(d.post_stream?.posts?.[0]?.cooked||'').replace(/<[^>]+>/g,'').slice(0,300)});}}catch{}
     }
     ctx.discuss=discuss;
@@ -1477,7 +1514,19 @@ function renderResult(D,ctx,an,num){
 
   const nStatic=an.c.length+an.py.length+an.sec.length+an.rc.length+an.ft.length+an.abi.length;
 
+  const evPartial=window.__evidencePartial||[];
+  const evBanner=evPartial.length?`
+  <div class="csec" style="background:var(--s1);border:1px solid var(--yw);border-radius:var(--r);padding:10px 14px;margin-bottom:14px">
+    <div style="font-size:12px;font-weight:700;color:var(--yw)">&#9888; EVIDENCE: PARTIAL</div>
+    <div style="font-size:12px;color:var(--tx2);margin-top:4px">This browser tool fetches one page per GitHub endpoint. The following source(s) hit that page limit, so items beyond the first page are not reflected below:</div>
+    <ul style="font-size:12px;color:var(--tx2);margin:6px 0 0 18px;padding:0">
+      ${evPartial.map(e=>`<li>${esc(e.source)} &mdash; ${e.of?`showing ${e.fetched} of ${e.of}`:`fetched ${e.fetched}, more may exist`}${e.reason?` (${esc(e.reason)})`:''}</li>`).join('')}
+    </ul>
+    <div style="font-size:11px;color:var(--tx3);margin-top:6px">For guaranteed-complete pagination, use the Python CLI (<code>python scripts/analyze.py ${esc(num)}</code>) instead.</div>
+  </div>`:'';
+
   $('maina').innerHTML=`
+  ${evBanner}
   <div class="prmeta">
     <div class="pr-top">
       <div>

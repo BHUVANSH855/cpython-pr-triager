@@ -79,6 +79,18 @@ class ProfileDataTests(unittest.TestCase):
                 f"{username} has no known_concerns",
             )
 
+    def test_no_fabricated_per_person_response_times(self):
+        """The static table must never assert a specific person's real
+        response time — that can only come from reviewer_activity.py's
+        live-computed median_response_days. See reviewer_profiles.py's
+        module docstring for the rationale."""
+        for username, profile in PROFILES.items():
+            self.assertIsNone(
+                profile.typical_response_days,
+                f"{username} has a hard-coded typical_response_days value; "
+                "this must come from live activity data, not a static guess.",
+            )
+
     def test_all_profiles_have_subsystems(self):
         for username, profile in PROFILES.items():
             self.assertTrue(

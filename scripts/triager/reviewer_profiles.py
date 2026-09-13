@@ -1,22 +1,39 @@
 """
 Reviewer profiles for CPython PR triage.
 
-Built directly from the actual python/cpython .github/CODEOWNERS file.
-No API calls needed — this is static knowledge derived from the file
-you can always find at:
+IMPORTANT — what this data is and is not
+-----------------------------------------
+`subsystems`, `co_owners`, and `focus_keywords` are structural metadata
+derived from the areas listed against a username in the actual
+python/cpython .github/CODEOWNERS file:
   https://github.com/python/cpython/blob/main/.github/CODEOWNERS
 
-Each reviewer profile contains:
-  - subsystems: what areas they own
-  - co_owners: who else owns the same areas (cross-review partners)
-  - focus_keywords: technical terms they care about in review
-  - known_concerns: what they typically ask about (from studying their PRs)
-  - devguide_url: their entry in the CPython experts index
+`known_concerns` is a **generic, project-maintained review checklist for
+the subsystem**, grouped here under the person who owns that area purely
+for routing convenience. It is NOT a record of anything a specific person
+has said, and it must never be rendered or described as a quote,
+paraphrase, or characterization of that individual. Treat it the same way
+you would treat a static lint rule: "changes to bytecodes.c usually need
+`make regen-cases`" is true of the subsystem, not a statement about
+Mark Shannon.
 
-These are used to:
-  1. Enrich CODEOWNERS routing with human context
+`typical_response_days` does not exist as a field with real values here —
+CPython does not publish reviewer response-time data, and this project
+does not currently compute it from live history. Any per-reviewer
+response-time signal shown to a user must come from
+`reviewer_activity.py`, which derives it from that reviewer's actual,
+freshly-fetched review timestamps (see `median_response_days` there), or
+it must be omitted.
+
+This module is used to:
+  1. Enrich CODEOWNERS routing with subsystem context
   2. Seed the reviewer_activity module with targeted search terms
-  3. Give the AI synthesis layer per-reviewer context
+  3. Give the AI synthesis layer per-subsystem review checklist context
+
+For anything that claims to describe a real person's actual behavior
+(what they ask for, how quickly they respond, their approval rate), use
+`reviewer_activity.py`, which computes it from that person's real,
+live-fetched GitHub activity — never from data hard-coded here.
 """
 
 from __future__ import annotations
@@ -27,22 +44,32 @@ from typing import Any
 
 @dataclass
 class ReviewerProfile:
-    """Static profile for one CPython reviewer."""
+    """Static routing profile for one CPython subsystem/reviewer pairing.
+
+    See the module docstring: `known_concerns` is a generic subsystem
+    checklist, not a record of anything the named individual has actually
+    said. `typical_response_days` is intentionally left at ``None`` here;
+    a real per-reviewer response-time signal only ever comes from
+    `reviewer_activity.py`'s live-computed `median_response_days`.
+    """
 
     username: str
     display_name: str
     subsystems: list[str]
     co_owners: list[str]
 
-    # Technical keywords this reviewer focuses on.
+    # Technical keywords associated with this subsystem.
     # Used to weight review comment searches.
     focus_keywords: list[str] = field(default_factory=list)
 
-    # Known concerns extracted from studying their real review comments.
-    # These are what they actually say, not generic advice.
+    # Generic, subsystem-level review checklist (NOT attributed quotes —
+    # see module docstring). Useful as "what this area of code tends to
+    # need reviewed," not as a description of a specific person.
     known_concerns: list[str] = field(default_factory=list)
 
-    # Approximate response time signal (days). None = unknown.
+    # Intentionally always None in this static table. A genuine per-person
+    # response-time signal must come from reviewer_activity.py's
+    # live-computed median_response_days, never be hard-coded here.
     typical_response_days: float | None = None
 
     devguide_url: str = ""
@@ -95,7 +122,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "The stack effect is wrong",
             "This needs to handle the error path correctly",
         ],
-        typical_response_days=3.0,
         devguide_url="https://devguide.python.org/core-developers/experts/#bytecode",
     ),
 
@@ -117,7 +143,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "The line number information needs updating",
             "Does this handle the case where the exception is raised inside a loop?",
         ],
-        typical_response_days=4.0,
     ),
 
     "picnixz": ReviewerProfile(
@@ -141,7 +166,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "The error message leaks information about the internal state",
             "Use hashlib.new() instead of the direct constructor",
         ],
-        typical_response_days=5.0,
     ),
 
     "ZeroIntensity": ReviewerProfile(
@@ -165,7 +189,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "The documentation for this C function is missing/incorrect",
             "Does this handle tp_traverse correctly for GC?",
         ],
-        typical_response_days=4.0,
     ),
 
     "encukou": ReviewerProfile(
@@ -189,7 +212,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "run: python Tools/build/stable_abi.py --generate",
             "This changes a struct layout — ABI break on stable branches",
         ],
-        typical_response_days=5.0,
     ),
 
     "gpshead": ReviewerProfile(
@@ -213,7 +235,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "The socket timeout handling is incorrect",
             "This needs a security note in the documentation",
         ],
-        typical_response_days=7.0,
     ),
 
     "pablogsal": ReviewerProfile(
@@ -238,7 +259,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "Please add a test to Lib/test/test_peg_generator/",
             "The tokenizer state machine needs to handle this case",
         ],
-        typical_response_days=4.0,
     ),
 
     "lysnikolaou": ReviewerProfile(
@@ -258,7 +278,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "t-strings interact with this — please add a test",
             "This changes the grammar — run regen-pegen",
         ],
-        typical_response_days=4.0,
     ),
 
     "JelleZijlstra": ReviewerProfile(
@@ -284,7 +303,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "Does this affect typing.get_annotations()?",
             "Protocol compatibility needs verification",
         ],
-        typical_response_days=3.0,
     ),
 
     "AlexWaygood": ReviewerProfile(
@@ -297,7 +315,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "Does mypy/pyright handle this correctly?",
             "Please add a typing test",
         ],
-        typical_response_days=3.0,
     ),
 
     "ericsnowcurrently": ReviewerProfile(
@@ -324,7 +341,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "The module state struct needs updating",
             "This bypasses the import system — why?",
         ],
-        typical_response_days=7.0,
     ),
 
     "brettcannon": ReviewerProfile(
@@ -342,7 +358,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "This needs to work with frozen modules",
             "Please check the importlib documentation",
         ],
-        typical_response_days=7.0,
     ),
 
     "1st1": ReviewerProfile(
@@ -363,7 +378,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "This changes the scheduling order — is that intentional?",
             "TaskGroup exception propagation needs testing",
         ],
-        typical_response_days=10.0,
     ),
 
     "asvetlov": ReviewerProfile(
@@ -380,7 +394,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "Does this handle connection_lost() correctly?",
             "The event loop policy is deprecated — use the loop parameter",
         ],
-        typical_response_days=7.0,
     ),
 
     "kumaraditya303": ReviewerProfile(
@@ -393,7 +406,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "Weakref callbacks can fire at unexpected times",
             "Does this work under free-threading?",
         ],
-        typical_response_days=3.0,
     ),
 
     "rhettinger": ReviewerProfile(
@@ -417,7 +429,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "The collections.abc registration needs updating",
             "This should be a recipe in the docs, not a new function",
         ],
-        typical_response_days=5.0,
     ),
 
     "vsajip": ReviewerProfile(
@@ -436,7 +447,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "The logging cookbook example needs updating",
             "Backward compat: this format change will break existing code",
         ],
-        typical_response_days=7.0,
     ),
 
     "barneygale": ReviewerProfile(
@@ -455,7 +465,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "The pathlib flavour distinction matters here",
             "Does this preserve the Path subclassing contract?",
         ],
-        typical_response_days=3.0,
     ),
 
     "ericvsmith": ReviewerProfile(
@@ -475,7 +484,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "field(default_factory=) behavior needs testing",
             "Slots dataclasses have different semantics here",
         ],
-        typical_response_days=5.0,
     ),
 
     "erlend-aasland": ReviewerProfile(
@@ -495,7 +503,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "Does this handle the sqlite3 error codes correctly?",
             "The docstring in the clinic block needs updating",
         ],
-        typical_response_days=4.0,
     ),
 
     "AA-Turner": ReviewerProfile(
@@ -519,7 +526,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "The What's New entry should mention this",
             "This needs a .. note:: about the behavior difference",
         ],
-        typical_response_days=3.0,
     ),
 
     "hugovk": ReviewerProfile(
@@ -536,7 +542,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "The CI workflow needs updating",
             "pre-commit hook should catch this",
         ],
-        typical_response_days=2.0,
     ),
 
     "StanFromIreland": ReviewerProfile(
@@ -549,7 +554,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "zlib version compatibility needs checking",
             "datetime arithmetic edge case",
         ],
-        typical_response_days=4.0,
     ),
 
     "pganssle": ReviewerProfile(
@@ -570,7 +574,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "Does this work without tzdata installed?",
             "Leap second handling",
         ],
-        typical_response_days=7.0,
     ),
 
     "gaogaotiantian": ReviewerProfile(
@@ -588,7 +591,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "Breakpoint condition evaluation needs error handling",
             "Does this interact correctly with sys.settrace?",
         ],
-        typical_response_days=4.0,
     ),
 
     "ethanfurman": ReviewerProfile(
@@ -608,7 +610,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "Does this preserve the enum string representation?",
             "tarfile security: path traversal check",
         ],
-        typical_response_days=7.0,
     ),
 
     "sethmlarson": ReviewerProfile(
@@ -624,7 +625,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "The SBOM needs updating for this dependency change",
             "This introduces a new vendored dependency — update SBOM",
         ],
-        typical_response_days=5.0,
     ),
 
     "FFY00": ReviewerProfile(
@@ -644,7 +644,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "WASI has no filesystem access by default",
             "sysconfig variables differ per platform",
         ],
-        typical_response_days=5.0,
     ),
 
     "brandtbucher": ReviewerProfile(
@@ -661,7 +660,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "Does this work on all JIT-supported platforms?",
             "Pattern matching: structural vs value patterns",
         ],
-        typical_response_days=5.0,
     ),
 
     "Fidget-Spinner": ReviewerProfile(
@@ -678,7 +676,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "Guard failure path must be correct",
             "stackref semantics: borrowed vs owned",
         ],
-        typical_response_days=5.0,
     ),
 
     "jaraco": ReviewerProfile(
@@ -696,7 +693,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "Does this work with namespace packages?",
             "importlib.resources: traversable interface",
         ],
-        typical_response_days=7.0,
     ),
 
     "giampaolo": ReviewerProfile(
@@ -710,7 +706,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "Symlink handling in shutil",
             "FTP passive mode handling",
         ],
-        typical_response_days=7.0,
     ),
 
     "serhiy-storchaka": ReviewerProfile(
@@ -728,7 +723,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "Unicode handling edge case",
             "The C implementation needs updating too",
         ],
-        typical_response_days=5.0,
     ),
 
     "ezio-melotti": ReviewerProfile(
@@ -738,7 +732,6 @@ PROFILES: dict[str, ReviewerProfile] = {
         co_owners=[],
         focus_keywords=["html", "parser", "entities", "encoding"],
         known_concerns=["HTML5 entity handling", "encoding edge case"],
-        typical_response_days=10.0,
     ),
 
     "mhsmith": ReviewerProfile(
@@ -751,7 +744,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "Does this work on all supported Android API levels?",
             "JNI reference management",
         ],
-        typical_response_days=7.0,
     ),
 
     "freakboy3742": ReviewerProfile(
@@ -765,7 +757,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "Does this work without fork()?",
             "Emscripten has no threads by default",
         ],
-        typical_response_days=7.0,
     ),
 
     "terryjreedy": ReviewerProfile(
@@ -779,7 +770,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "tkinter version compatibility",
             "Does this work on macOS Aqua?",
         ],
-        typical_response_days=5.0,
     ),
 
     "gvanrossum": ReviewerProfile(
@@ -797,7 +787,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "The runtime behavior must match the type system semantics",
             "This is a language change — needs broader discussion",
         ],
-        typical_response_days=14.0,
     ),
 
     "vstinner": ReviewerProfile(
@@ -820,7 +809,6 @@ PROFILES: dict[str, ReviewerProfile] = {
             "Thread safety: is this operation atomic?",
             "Memory: check for integer overflow in size calculation",
         ],
-        typical_response_days=5.0,
     ),
 }
 

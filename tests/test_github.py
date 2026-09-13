@@ -642,6 +642,65 @@ class GitHubTests(unittest.TestCase):
             str(context.exception),
         )
 
+    def test_raw_content_rejects_download_url_from_unexpected_host(self):
+        """download_url normally comes straight from GitHub's own API
+        response, so in ordinary operation this always matches. This is
+        defense-in-depth against a compromised/unexpected response
+        causing the client to fetch and trust content from an arbitrary
+        external host under the guise of "repository content"."""
+
+        def opener(request, timeout):
+            url = request.full_url
+
+            if "/contents/large.txt" in url:
+                return FakeResponse(
+                    {
+                        "download_url": (
+                            "https://evil.example.com/steal/large.txt"
+                        ),
+                    }
+                )
+
+            raise AssertionError(
+                f"Unexpected URL: {url} — the untrusted host must never "
+                "actually be requested."
+            )
+
+        with tempfile.TemporaryDirectory() as temp:
+            client = GitHub(
+                cache_dir=Path(temp),
+                cache_ttl=0,
+                retries=1,
+                opener=opener,
+            )
+
+            with self.assertRaises(GitHubError) as context:
+                client.raw_content("large.txt", "main")
+
+        self.assertIn("unexpected", str(context.exception).lower())
+
+    def test_is_allowed_raw_host_accepts_known_github_hosts(self):
+        from scripts.triager.github import _is_allowed_raw_host
+
+        for url in (
+            "https://raw.githubusercontent.com/python/cpython/main/x.py",
+            "https://github.com/python/cpython/raw/main/x.py",
+            "https://api.github.com/repos/python/cpython/contents/x.py",
+            "https://codeload.github.com/python/cpython/tar.gz/main",
+        ):
+            self.assertTrue(_is_allowed_raw_host(url), url)
+
+    def test_is_allowed_raw_host_rejects_other_hosts(self):
+        from scripts.triager.github import _is_allowed_raw_host
+
+        for url in (
+            "https://evil.example.com/x.py",
+            "https://raw.githubusercontent.com.evil.example.com/x.py",
+            "not-a-url",
+            "",
+        ):
+            self.assertFalse(_is_allowed_raw_host(url), url)
+
     def test_codeowners_uses_first_available_candidate(self):
         requests = []
 

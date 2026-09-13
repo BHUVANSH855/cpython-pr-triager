@@ -36,6 +36,29 @@ DEFAULT_PER_PAGE = 100
 DEFAULT_MAX_PAGES = 100
 MAX_RAW_CONTENT_BYTES = 10 * 1024 * 1024
 
+# Hosts this client will treat as legitimate sources of "repository
+# content." download_url normally comes straight from GitHub's own API
+# response, so in ordinary operation this always matches; the allowlist
+# is defense-in-depth against a compromised/unexpected response causing
+# this client to fetch and trust content from an arbitrary external host
+# under the guise of "repository content."
+ALLOWED_RAW_CONTENT_HOSTS = frozenset({
+    "raw.githubusercontent.com",
+    "github.com",
+    "api.github.com",
+    "codeload.github.com",
+})
+
+
+def _is_allowed_raw_host(url: str) -> bool:
+    """Return whether ``url`` points at an allowed GitHub content host."""
+    try:
+        host = urllib.parse.urlparse(url).hostname or ""
+    except ValueError:
+        return False
+    return host.lower() in ALLOWED_RAW_CONTENT_HOSTS
+
+
 _DEFAULT_BOT_LOGINS: frozenset[str] = frozenset({
     "miss-islington",
     "bedevere-bot",
@@ -916,6 +939,11 @@ class GitHub:
         download_url = data.get("download_url")
 
         if isinstance(download_url, str) and download_url:
+            if not _is_allowed_raw_host(download_url):
+                raise GitHubError(
+                    "Refusing to fetch raw content from an unexpected "
+                    f"host: {download_url}"
+                )
             return self.request_text(
                 download_url,
                 use_cache=False,

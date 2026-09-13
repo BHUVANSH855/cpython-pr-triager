@@ -92,13 +92,33 @@ class BuildActivityTests(unittest.TestCase):
         self.assertIsNone(activity.approval_rate)
 
     def test_calculates_approval_rate(self):
+        # MIN_APPROVAL_RATE_SAMPLE verdicts are required before a rate is
+        # reported at all — see test_approval_rate_suppressed_below_min_sample.
+        reviews = [
+            {"state": "APPROVED"},
+            {"state": "APPROVED"},
+            {"state": "APPROVED"},
+            {"state": "APPROVED"},
+            {"state": "CHANGES_REQUESTED"},
+            {"state": "CHANGES_REQUESTED"},
+        ]
+        activity = _build_activity_from_reviews("alice", [], reviews)
+        self.assertAlmostEqual(activity.approval_rate, 0.67, places=1)
+        self.assertEqual(activity.approval_rate_sample_size, 6)
+
+    def test_approval_rate_suppressed_below_min_sample(self):
+        """A tiny sample must not be reported as a precise percentage —
+        see the reviewer sample-size audit finding."""
         reviews = [
             {"state": "APPROVED"},
             {"state": "APPROVED"},
             {"state": "CHANGES_REQUESTED"},
         ]
         activity = _build_activity_from_reviews("alice", [], reviews)
-        self.assertAlmostEqual(activity.approval_rate, 0.67, places=1)
+        self.assertIsNone(activity.approval_rate)
+        # The sample size itself is still exposed so a report can say
+        # "insufficient sample (n=3)" instead of just omitting the field.
+        self.assertEqual(activity.approval_rate_sample_size, 3)
 
     def test_counts_concern_frequency(self):
         comments = [

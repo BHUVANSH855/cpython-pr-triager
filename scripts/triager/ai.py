@@ -51,23 +51,97 @@ REQUIRED_FIELDS = (
 
 
 def _compact_report(report: dict[str, Any], limit: int = 120_000) -> str:
-    """Serialize evidence while preventing an accidentally enormous prompt."""
+    """Serialize evidence for the AI prompt, prioritizing the fields a
+    maintainer needs most and truncating at field boundaries rather than
+    an arbitrary character offset.
+
+    A raw ``text[:limit]`` truncation can cut off mid-value and, worse,
+    loses whatever happened to be serialized last — which may be the
+    deterministic disposition, evidence-completeness state, or a critical
+    finding, depending on field order and total evidence size. Instead,
+    fields are added to the compacted payload in priority order and the
+    payload stops growing once the byte budget is spent; anything not
+    included is recorded by name in ``_omitted_sections`` so the model
+    (and anyone reading the prompt) can see exactly what evidence it did
+    not receive, rather than silently losing high-priority information.
+    """
     if not isinstance(report, dict):
         raise AISynthesisError("AI report input must be a JSON object")
 
+    # Priority order: the fields maintainers need most to trust a triage
+    # result come first, so they are the ones most likely to survive
+    # truncation on unusually large PRs.
+    priority_fields = [
+        "disposition",
+        "evidence_completeness",
+        "process_signals",
+        "technical_findings",
+        "checks",
+        "check_summaries",
+        "pr",
+        "expert_contexts",
+        "experts",
+        "backport_targets",
+        "signature_changes",
+        "historical_context",
+        "linked_issues",
+        "files",
+        "labels",
+        "evidence_counts",
+        "timeline",
+        "references",
+        "metadata",
+    ]
+
+    remaining_keys = [key for key in report if key not in priority_fields]
+    ordered_keys = [key for key in priority_fields if key in report] + remaining_keys
+
+    def _encode(value: Any) -> str:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
     try:
-        text = json.dumps(
-            report,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
+        full_text = _encode(report)
     except (TypeError, ValueError) as exc:
         raise AISynthesisError("AI evidence could not be serialized") from exc
 
-    if len(text) <= limit:
-        return text
+    if len(full_text) <= limit:
+        return full_text
 
-    return text[:limit] + "\n...[evidence truncated]"
+    # Reserve room for the closing marker so the final payload never
+    # exceeds ``limit`` even after appending it.
+    marker_reserve = 200
+    budget = max(limit - marker_reserve, 0)
+
+    included: dict[str, Any] = {}
+    omitted: list[str] = []
+    used = 2  # account for the enclosing "{}"
+
+    for key in ordered_keys:
+        try:
+            encoded_field = _encode({key: report[key]})
+        except (TypeError, ValueError):
+            omitted.append(key)
+            continue
+
+        # +1 for the comma joining this field to the previous one, once
+        # there is more than one field already included.
+        projected = used + len(encoded_field) - 2 + (1 if included else 0)
+
+        if projected > budget:
+            omitted.append(key)
+            continue
+
+        included[key] = report[key]
+        used = projected
+
+    text = _encode(included)
+    if omitted:
+        text += (
+            f"\n...[evidence truncated: {len(omitted)} lower-priority "
+            f"section(s) omitted to fit the prompt budget: "
+            f"{', '.join(omitted)}]"
+        )
+    return text
 
 
 def build_prompt(report: dict[str, Any]) -> str:
@@ -201,8 +275,29 @@ def _provider_factory():
     return AIProviderError, create_provider
 
 
-def _parse_response(raw: str) -> dict[str, Any]:
-    """Parse and validate the model's structured JSON response."""
+def _parse_response(
+    raw: str,
+    *,
+    deterministic_disposition: str | None = None,
+    known_experts: Any = None,
+) -> dict[str, Any]:
+    """Parse and validate the model's structured JSON response.
+
+    ``deterministic_disposition``, when supplied, is enforced rather than
+    merely requested in the prompt: the model's ``triage`` field is
+    schema-checked as before, but the deterministic value always wins in
+    the returned result. If the model disagreed, that disagreement is
+    preserved in ``ai_triage_disagreement`` for transparency instead of
+    being silently discarded — but it can never change what downstream
+    code treats as the PR's disposition.
+
+    ``known_experts``, when supplied, is the set of usernames the
+    deterministic CODEOWNERS/expert evidence actually surfaced for this
+    PR. Any AI-suggested ``expert_routing`` owner outside that set is
+    recorded in ``unverified_expert_owners`` rather than trusted at face
+    value — the prompt tells the model not to invent owners, but nothing
+    stops it from doing so anyway, so this is enforced in code too.
+    """
     text = raw.strip()
 
     if text.startswith("```"):
@@ -221,6 +316,29 @@ def _parse_response(raw: str) -> dict[str, Any]:
         raise AISynthesisError("AI returned invalid JSON") from exc
 
     _validate_result(result)
+
+    if deterministic_disposition is not None:
+        model_triage = result["triage"]
+        if model_triage != deterministic_disposition:
+            result["ai_triage_disagreement"] = model_triage
+        result["triage"] = deterministic_disposition
+
+    if known_experts is not None:
+        known = {
+            str(owner).lstrip("@")
+            for owner in known_experts
+            if owner
+        }
+        unverified = sorted({
+            str(item.get("owner", "")).lstrip("@")
+            for item in result.get("expert_routing", [])
+            if isinstance(item, dict)
+            and str(item.get("owner", "")).lstrip("@")
+            and str(item.get("owner", "")).lstrip("@") not in known
+        })
+        if unverified:
+            result["unverified_expert_owners"] = unverified
+
     return result
 
 
@@ -351,6 +469,18 @@ def synthesize(
 
     prompt = build_prompt(report)
 
+    deterministic_disposition = report.get("disposition")
+    if not isinstance(deterministic_disposition, str):
+        deterministic_disposition = None
+
+    known_experts = None
+    if "expert_contexts" in report or "experts" in report:
+        known_experts = []
+        for source_key in ("expert_contexts", "experts"):
+            for item in report.get(source_key) or []:
+                if isinstance(item, dict) and item.get("owner"):
+                    known_experts.append(item["owner"])
+
     AIProviderError, create_provider = _provider_factory()
 
     try:
@@ -364,4 +494,8 @@ def synthesize(
     except AIProviderError as exc:
         raise AISynthesisError(str(exc)) from exc
 
-    return _parse_response(raw)
+    return _parse_response(
+        raw,
+        deterministic_disposition=deterministic_disposition,
+        known_experts=known_experts,
+    )

@@ -508,5 +508,60 @@ class RulesCompletenessTests(unittest.TestCase):
         self.assertIn("cpython-pycobject", RULES)
 
 
+class CIFreshnessTests(unittest.TestCase):
+    """Verify CI evidence is independently validated against the PR's
+    current head SHA rather than trusted purely from request parameters
+    (see the "CI evidence tied to a head SHA" audit finding)."""
+
+    def _pr(self, head_sha="abc123"):
+        return {"head": {"sha": head_sha}}
+
+    def test_fresh_when_all_check_runs_match_head(self):
+        evidence = {
+            "check_runs": {
+                "check_runs": [
+                    {"status": "completed", "conclusion": "success", "head_sha": "abc123"},
+                    {"status": "completed", "conclusion": "success", "head_sha": "abc123"},
+                ]
+            },
+            "statuses": [],
+        }
+        checks = triager.build_checks(None, self._pr("abc123"), evidence)
+        self.assertTrue(checks["ci_fresh"])
+        self.assertEqual(checks["pr_head_sha"], "abc123")
+        self.assertNotIn("stale_check_shas", checks)
+
+    def test_stale_when_a_check_run_belongs_to_a_different_sha(self):
+        evidence = {
+            "check_runs": {
+                "check_runs": [
+                    {"status": "completed", "conclusion": "success", "head_sha": "abc123"},
+                    {"status": "completed", "conclusion": "success", "head_sha": "def456"},
+                ]
+            },
+            "statuses": [],
+        }
+        checks = triager.build_checks(None, self._pr("abc123"), evidence)
+        self.assertFalse(checks["ci_fresh"])
+        self.assertEqual(checks["stale_check_shas"], ["def456"])
+
+    def test_freshness_unknown_when_no_check_runs(self):
+        evidence = {"check_runs": {"check_runs": []}, "statuses": []}
+        checks = triager.build_checks(None, self._pr("abc123"), evidence)
+        self.assertIsNone(checks["ci_fresh"])
+
+    def test_mergeability_signals_warn_on_stale_ci(self):
+        checks = {
+            "available": True,
+            "pr_head_sha": "abc123",
+            "ci_fresh": False,
+            "stale_check_shas": ["def456"],
+            "check_runs": [],
+            "summary": {"failures": 0},
+        }
+        signals = triager.mergeability_signals(self._pr("abc123"), checks)
+        self.assertTrue(any("STALE CI" in msg for _level, msg in signals))
+
+
 if __name__ == "__main__":
     unittest.main()

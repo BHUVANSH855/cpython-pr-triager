@@ -7,6 +7,7 @@ name = "cpython-pr-triager"
 version = "0.9.0"
 description = "Evidence-based maintainer-assist tooling for CPython pull requests"
 requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
 dependencies = []
 
 [project.optional-dependencies]

@@ -130,8 +130,16 @@ class ReviewerActivity:
     # Total reviews fetched
     total_reviews: int = 0
 
-    # Approval rate (0.0 - 1.0). None if no completed reviews.
+    # Approval rate (0.0 - 1.0). None if the verdict sample is too small
+    # to be meaningful (see MIN_APPROVAL_RATE_SAMPLE) or there are no
+    # completed reviews at all.
     approval_rate: float | None = None
+
+    # How many APPROVED/CHANGES_REQUESTED verdicts approval_rate is based
+    # on. Always populated (even when approval_rate itself is suppressed
+    # for being too small) so a report can say "n=2, below threshold"
+    # instead of just silently having no rate.
+    approval_rate_sample_size: int = 0
 
     # How often each concern category appears (e.g. needs_test: 45)
     concern_frequency: dict[str, int] = field(default_factory=dict)
@@ -163,6 +171,7 @@ class ReviewerActivity:
             "username": self.username,
             "total_reviews": self.total_reviews,
             "approval_rate": self.approval_rate,
+            "approval_rate_sample_size": self.approval_rate_sample_size,
             "concern_frequency": self.concern_frequency,
             "top_concerns": self.top_concerns,
             "sample_phrases": self.sample_phrases,
@@ -178,6 +187,7 @@ class ReviewerActivity:
             username=data.get("username", ""),
             total_reviews=data.get("total_reviews", 0),
             approval_rate=data.get("approval_rate"),
+            approval_rate_sample_size=data.get("approval_rate_sample_size", 0),
             concern_frequency=data.get("concern_frequency", {}),
             top_concerns=data.get("top_concerns", []),
             sample_phrases=data.get("sample_phrases", []),
@@ -186,6 +196,14 @@ class ReviewerActivity:
             fetched_at=data.get("fetched_at", 0.0),
             from_cache=True,
         )
+
+
+# A reviewer's approval rate is not a meaningful signal on a tiny sample —
+# one review out of one is not "100% approval rate," it is "we don't know
+# yet." Below this many APPROVED/CHANGES_REQUESTED verdicts, approval_rate
+# is suppressed (set to None) rather than reported as if it were reliable.
+# This is a project quality threshold, not a claim about CPython itself.
+MIN_APPROVAL_RATE_SAMPLE = 5
 
 
 def _build_activity_from_reviews(
@@ -217,16 +235,20 @@ def _build_activity_from_reviews(
             elif parts:
                 subsystems[parts[0]] += 1
 
-    # Calculate approval rate from full review records
+    # Calculate approval rate from full review records. The sample size
+    # behind this rate (verdict count, NOT inline-comment count — those
+    # are a different, larger population) is preserved so downstream
+    # consumers can show "n=3" instead of implying a stable percentage.
     verdicts = [
         r.get("state")
         for r in reviews
         if r.get("state") in ("APPROVED", "CHANGES_REQUESTED")
     ]
+    approval_rate_sample_size = len(verdicts)
     approval_rate: float | None = None
-    if verdicts:
+    if approval_rate_sample_size >= MIN_APPROVAL_RATE_SAMPLE:
         approvals = sum(1 for v in verdicts if v == "APPROVED")
-        approval_rate = round(approvals / len(verdicts), 2)
+        approval_rate = round(approvals / approval_rate_sample_size, 2)
 
     # Deduplicate phrases while preserving order
     seen_phrases: set[str] = set()
@@ -250,6 +272,7 @@ def _build_activity_from_reviews(
         username=username,
         total_reviews=len(review_comments),
         approval_rate=approval_rate,
+        approval_rate_sample_size=approval_rate_sample_size,
         concern_frequency=dict(concern_counter),
         top_concerns=top_concerns,
         sample_phrases=unique_phrases[:20],

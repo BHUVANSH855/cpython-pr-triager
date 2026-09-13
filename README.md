@@ -23,16 +23,18 @@ This repository ships two separate tools that do **not** share code:
 | Tool | File | How it works |
 |------|------|--------------|
 | **Python CLI** | `scripts/analyze.py` | Runs server-side. Full pagination, caching, retries, CODEOWNERS from the live repo. Use this for reliable results. |
-| **Web triager** | `index.html` | Runs in-browser. Calls the GitHub API and Anthropic API directly. Faster to share but has no server-side caching or pagination guarantees. |
+| **Web triager** | `index.html` | Runs in-browser. Calls the GitHub API directly. Fetches CODEOWNERS live from the PR's base SHA, same as the CLI. Faster to share, but fetches only **one page per GitHub endpoint** (no follow-up pagination) — the page shows an "EVIDENCE: PARTIAL" notice when a page limit is hit. It has no server-side caching, and it never calls an AI model (there is no LLM synthesis step in the browser tool, only the same deterministic static-analysis rules). |
 
-The web UI (`index.html`) contains its own hard-coded CODEOWNERS expert list
-and layout rules which may drift from the Python package. Treat it as a
-quick-look tool, not a source of truth.
+The web UI (`index.html`) has its own implementation of the deterministic
+analysis rules, kept deliberately smaller than the Python package. Treat it
+as a quick-look tool, not a source of truth; the CLI is the reliable,
+completely-paginated path.
 
 ## Requirements
 
 - Python 3.11+
-- No third-party Python packages
+- No third-party Python packages at runtime
+- `pytest` is required to run the test suite (`pip install -e ".[test]"`)
 - Internet access to the GitHub REST API
 - `GITHUB_TOKEN` is strongly recommended (5 000 req/hr vs 60 unauthenticated)
 
@@ -160,7 +162,9 @@ $env:ANTHROPIC_MODEL="claude-opus-5"
   - The analyzer treats these statuses as policy evidence and emits a review
     signal when a PR's labels or target branch appear inconsistent with the
     current lifecycle policy.
-- `needs-backport-to-X.Y` label detection (hyphenated format)
+- `needs backport to X.Y` label detection (current spaced format; the
+  legacy hyphenated `needs-backport-to-X.Y` is also recognized for
+  compatibility with older PRs, but current CPython PRs use the spaced form)
 - current CI/check state
 
 ### Technical review prompts
@@ -210,6 +214,22 @@ candidates in order:
 
 The last-matching-pattern rule is followed correctly.
 
+## Reviewer routing data — what's real and what's generic
+
+`scripts/triager/reviewer_profiles.py` groups a per-subsystem review
+checklist under the username that owns that area in CODEOWNERS (e.g.
+"changes to `bytecodes.c` usually need `make regen-cases`"). **This
+checklist is generic, project-maintained guidance about the subsystem —
+it is never a record of anything the named individual has actually said,
+and it must not be presented as a quote or personal characterization.**
+
+Anything that claims to describe what a *specific person* actually does —
+their approval rate, what they've recently asked for in reviews, response
+patterns — comes only from `scripts/triager/reviewer_activity.py`, which
+computes it live from that person's real, freshly-fetched GitHub review
+comments (cached for 24h). If that live data isn't available, the tool
+omits the per-person claim rather than substituting a guess.
+
 ## Local cache
 
 Responses are cached under `.triager-cache/` (git-ignored, expires in 15 min).
@@ -229,20 +249,28 @@ Do not commit the token. Without a token the API rate limit is 60 requests/hr.
 
 ## Testing
 
+The canonical, supported way to run the test suite is `pytest` (some test
+files depend on it directly and will fail to even import under plain
+`unittest`):
+
 ```powershell
-# From the repository root:
-python -m unittest discover -s tests -v
+pip install -e ".[test]"
+python -m pytest -q
 ```
+
+This is also exactly what CI runs (`.github/workflows/tests.yml`).
 
 Test files:
 
 | File | What it covers |
 |------|---------------|
 | `tests/test_triager.py` | `analyze.py` orchestration layer |
-| `tests/test_analyzers.py` | Static analysis rules (all 23-point fixes) |
+| `tests/test_analyzers.py` | Static analysis rules |
 | `tests/test_policy.py` | Process/policy signals, branch rules, backport regex |
 | `tests/test_references.py` | Reference extraction (gh-, bpo-, discuss.python.org) |
 | `tests/test_github.py` | GitHub client (pagination, caching, retries) |
+| `tests/test_reviewer_profiles.py` | Static subsystem routing data (see note below) |
+| `tests/test_reviewer_activity.py` | Live, per-reviewer activity derived from real comments |
 
 ## Important limitations
 
@@ -259,3 +287,17 @@ A high-quality triage result answers:
 6. What evidence is missing or uncertain?
 
 That is the standard this project is designed around.
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE). This project is independent
+tooling for working with `python/cpython`; it is not part of CPython
+itself and is not covered by the PSF License.
+
+## Changelog / audit history
+
+This project has been through external audit passes; see
+[CHANGELOG.md](CHANGELOG.md) for exactly what was fixed in response to
+each, and what was deliberately deferred and why. If you're deciding
+whether to trust this tool for a specific use, read that file's "Known,
+currently-accepted limitations" section before the rest of this README.

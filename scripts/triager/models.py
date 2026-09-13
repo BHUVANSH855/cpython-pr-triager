@@ -481,6 +481,13 @@ class CheckSummary:
     legacy_status: str | None = None
     error: str | None = None
 
+    # CI-freshness fields: whether the returned check runs were
+    # independently confirmed to belong to the PR's current head SHA
+    # (see scripts/analyze.py build_checks). ``None`` means freshness
+    # could not be evaluated (e.g. no check runs were returned at all).
+    pr_head_sha: str | None = None
+    ci_fresh: bool | None = None
+
     @staticmethod
     def _safe_count(value: Any) -> int:
         """Normalize a count into a non-negative integer."""
@@ -516,6 +523,10 @@ class CheckSummary:
                 self.error,
                 "CheckSummary.error",
             ),
+            (
+                self.pr_head_sha,
+                "CheckSummary.pr_head_sha",
+            ),
         ):
             if value is not None and not isinstance(
                 value,
@@ -524,6 +535,9 @@ class CheckSummary:
                 raise TypeError(
                     f"{field_name} must be a string or None"
                 )
+
+        if self.ci_fresh is not None:
+            self.ci_fresh = bool(self.ci_fresh)
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible representation."""
@@ -593,16 +607,22 @@ class ExpertContext:
     pattern: str
     line: int = 0
 
-    # Static profile fields
+    # Static routing fields. `known_concerns` is a generic, project-
+    # maintained subsystem review checklist — it is NOT a record of
+    # anything the named individual has said (see reviewer_profiles.py).
+    # `typical_response_days` is intentionally always None from the
+    # static table; only `reviewer_activity`'s live computation may set it.
     subsystems: list[str] = field(default_factory=list)
     co_owners: list[str] = field(default_factory=list)
     known_concerns: list[str] = field(default_factory=list)
     focus_keywords: list[str] = field(default_factory=list)
     typical_response_days: float | None = None
 
-    # Dynamic activity fields
+    # Dynamic activity fields — derived live from this specific person's
+    # actual, freshly-fetched GitHub review comments.
     dynamic_concerns: list[str] = field(default_factory=list)
     approval_rate: float | None = None
+    approval_rate_sample_size: int = 0
     sample_phrases: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -694,6 +714,7 @@ class ExpertContext:
             "typical_response_days": self.typical_response_days,
             "dynamic_concerns": list(self.dynamic_concerns),
             "approval_rate": self.approval_rate,
+            "approval_rate_sample_size": self.approval_rate_sample_size,
             "sample_phrases": list(self.sample_phrases),
             "all_concerns": self.all_concerns,
         }

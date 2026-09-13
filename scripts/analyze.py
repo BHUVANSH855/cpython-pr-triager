@@ -641,6 +641,24 @@ def build_checks(gh, pr, evidence=None):
         if isinstance(item, dict) and item.get("status") == "completed"
     ]
 
+    # CI-freshness validation (independent of the request that fetched the
+    # data): confirm every returned check run actually belongs to the
+    # PR's current head SHA rather than trusting the request parameters
+    # alone. This protects against stale/reused evidence (e.g. a cached
+    # snapshot collected against an earlier commit) silently being
+    # reported as current CI state.
+    stale_check_shas = sorted({
+        run.get("head_sha")
+        for run in result["check_runs"]
+        if isinstance(run, dict)
+        and run.get("head_sha")
+        and run.get("head_sha") != head_sha
+    })
+    result["pr_head_sha"] = head_sha
+    result["ci_fresh"] = not stale_check_shas if result["check_runs"] else None
+    if stale_check_shas:
+        result["stale_check_shas"] = stale_check_shas
+
     result["summary"] = {
         "check_runs": len(result["check_runs"]),
         "completed": sum(
@@ -661,6 +679,8 @@ def build_checks(gh, pr, evidence=None):
             conclusion in {"success", "neutral", "skipped"}
             for conclusion in conclusions
         ),
+        "pr_head_sha": head_sha,
+        "ci_fresh": result["ci_fresh"],
     }
 
     if isinstance(result["status"], dict):
@@ -696,6 +716,16 @@ def mergeability_signals(pr, checks):
                 f"Mergeability could not be determined: {reason}",
             )
         ]
+
+    if checks.get("ci_fresh") is False:
+        stale = ", ".join(checks.get("stale_check_shas") or [])
+        signals.append((
+            "WARN",
+            "STALE CI: some returned check runs belong to a different "
+            f"commit ({stale}) than the PR's current head "
+            f"({checks.get('pr_head_sha')}); do not treat this CI result "
+            "as current without re-verifying.",
+        ))
 
     if checks.get("checks_error"):
         signals.append(
@@ -947,23 +977,33 @@ def print_report(report, quiet=False):
             subsystems = expert.get("subsystems") or []
             sub_str = f" [{', '.join(subsystems[:3])}]" if subsystems else ""
             print(f"  {owner} <- {file_} ({pattern}){sub_str}")
-            # Known concerns from static profile
-            concerns = (expert.get("known_concerns") or [])[:3]
-            for concern in concerns:
-                print(f"    ↳ {concern}")
+            # Generic subsystem review checklist. NOT a record of anything
+            # this person has actually said — see reviewer_profiles.py.
+            checklist = (expert.get("known_concerns") or [])[:3]
+            if checklist:
+                print("    Subsystem review checklist (generic, not attributed quotes):")
+                for item in checklist:
+                    print(f"      - {item}")
             # Co-owners suggestion
             co = expert.get("co_owners") or []
             if co:
                 print(f"    Co-owners: {', '.join('@' + c for c in co[:4])}")
-            # Dynamic activity
+            # Dynamic, evidence-based activity for THIS specific person,
+            # computed live from their real recent GitHub review comments.
+            dynamic_concerns = expert.get("dynamic_concerns") or []
+            if dynamic_concerns:
+                print(f"    Observed in their recent reviews: {', '.join(dynamic_concerns[:3])}")
             rate = expert.get("approval_rate")
+            n = expert.get("approval_rate_sample_size") or 0
             resp = expert.get("typical_response_days")
-            if rate is not None or resp is not None:
+            if rate is not None or resp is not None or n:
                 parts = []
                 if rate is not None:
-                    parts.append(f"approval rate {rate:.0%}")
+                    parts.append(f"approval rate {rate:.0%} (n={n}, from recent live activity)")
+                elif n:
+                    parts.append(f"approval rate: insufficient sample (n={n})")
                 if resp is not None:
-                    parts.append(f"~{resp:.0f}d response")
+                    parts.append(f"~{resp:.0f}d median response (from recent live activity)")
                 print(f"    Activity: {' | '.join(parts)}")
 
     checks = report.get("checks", {})
@@ -976,6 +1016,14 @@ def print_report(report, quiet=False):
         print(f"  Failures:   {summary.get('failures', 0)}")
         if summary.get("legacy_status"):
             print(f"  Commit status: {summary['legacy_status']}")
+        ci_fresh = summary.get("ci_fresh")
+        pr_head = summary.get("pr_head_sha")
+        if ci_fresh is True:
+            print(f"  Freshness:  FRESH — all returned checks match PR head {pr_head}")
+        elif ci_fresh is False:
+            print(f"  Freshness:  STALE — some checks do NOT match PR head {pr_head}; re-verify before trusting this CI result")
+        elif pr_head:
+            print(f"  Freshness:  unknown (no check runs returned for head {pr_head})")
 
     if not quiet:
         ec = report["evidence_counts"]
