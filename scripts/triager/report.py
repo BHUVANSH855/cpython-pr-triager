@@ -541,15 +541,6 @@ def build_report(
 
     process_models = _normalise_process(process)
 
-    check_summary = checks.get("summary", {})
-    if not isinstance(check_summary, Mapping): check_summary = {}
-    failures = _safe_int(check_summary.get("failures"))
-    if failures:
-        process_models.append(ProcessSignal(
-            level="WARN",
-            message=f"{failures} completed CI check(s) have failure-like conclusions.",
-        ))
-
     evidence_completeness = _build_evidence_completeness(evidence)
     file_reports = _build_file_reports(files, classify)
     historical_context = _build_historical_context(evidence)

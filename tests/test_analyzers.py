@@ -21,6 +21,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from scripts.triager.analyzers import (
     FREE_THREAD_SUBSYSTEMS,
+    _is_test_path,
     analyze_file,
     analyze_files,
     analyze_patch,
@@ -966,3 +967,65 @@ class HistoryAnalysisTests(unittest.TestCase):
         self.assertIn("deadbeef", observed)
         self.assertIn("Stable ABI", observed)
 
+
+
+class TestPathClassificationTests(unittest.TestCase):
+    """Regression tests for a real bug found by running the CLI against a
+    live CPython PR (see CHANGELOG.md): _is_test_path only recognized
+    Lib/test/, Tools/test/, and Modules/_testcapi/ as test locations, but
+    CPython keeps real tests for several stdlib packages in their own
+    nested test/ directory. A PR that only touched one of those would be
+    misclassified as having "no test file changed" — a false-positive
+    review prompt on a PR that did add tests."""
+
+    def test_recognizes_nested_stdlib_package_test_directories(self):
+        real_cpython_test_paths = [
+            "Lib/ctypes/test/test_values.py",
+            "Lib/tkinter/test/test_tkinter/test_widgets.py",
+            "Lib/sqlite3/test/test_dbapi.py",
+            "Lib/unittest/test/test_case.py",
+            "Lib/test/test_asyncio/test_tasks.py",
+        ]
+        for path in real_cpython_test_paths:
+            with self.subTest(path=path):
+                self.assertTrue(_is_test_path(path), path)
+
+    def test_recognizes_differently_named_test_directories(self):
+        # idlelib's tests live in idle_test/, not test/.
+        self.assertTrue(
+            _is_test_path("Lib/idlelib/idle_test/test_editor.py")
+        )
+
+    def test_still_recognizes_original_test_roots(self):
+        for path in (
+            "Lib/test/test_os.py",
+            "Tools/test/test_something.py",
+            "Modules/_testcapi/heaptype.c",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(_is_test_path(path), path)
+
+    def test_does_not_misclassify_production_code_as_a_test(self):
+        for path in (
+            "Objects/listobject.c",
+            "Lib/asyncio/tasks.py",
+            "Modules/_testcapimodule.c",  # contains "_testcapi" but is
+                                          # itself a production-ish shim,
+                                          # not under a test/ directory
+        ):
+            with self.subTest(path=path):
+                self.assertFalse(_is_test_path(path), path)
+
+    def test_end_to_end_no_false_positive_missing_test_finding(self):
+        """The full analyze_files() path must not flag "no test file
+        changed" when the only changed files are production code plus a
+        real test file living in a nested stdlib test/ directory."""
+        files = [
+            _make_file("Lib/ctypes/_endian.py", ["x = 1"]),
+            _make_file("Lib/ctypes/test/test_values.py", ["def test_x(): pass"]),
+        ]
+        findings, _ = analyze_files(files)
+        messages = [f.message for f in findings]
+        assert not any(
+            "without a test-file change" in message for message in messages
+        ), messages

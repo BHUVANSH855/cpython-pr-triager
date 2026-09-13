@@ -587,14 +587,28 @@ def _build_report_inputs(
 
 
 class ReportAssemblyTests:
-    def test_build_report_warns_on_ci_failures_without_crashing(self):
-        """Regression test: build_report() used to construct
-        ProcessSignal(signal=..., ...) here, but the dataclass's actual
-        field is `level`, not `signal`. This branch is only reached when
-        checks["summary"]["failures"] is truthy, and every other test in
-        this file uses failures=0 — so this TypeError was never caught by
-        the test suite and only surfaced when running the CLI against a
-        real CPython PR that had a failing check. See CHANGELOG.md."""
+    def test_build_report_does_not_crash_on_ci_failure_data(self):
+        """Regression test for a real bug found by running the CLI against
+        a live CPython PR (see CHANGELOG.md, Round 3): a stray
+        ProcessSignal(signal=..., ...) call here used the wrong keyword
+        (the dataclass field is `level`) and crashed the moment any real
+        PR had a failing check. Every test that reached this code with a
+        `checks` argument used failures=0, so the bug was invisible to
+        the suite despite 90% coverage.
+
+        Once fixed, a second issue turned up in the same live run: this
+        function used to *also* independently derive a CI-failure
+        ProcessSignal from raw check data, duplicating (with a less
+        informative message) the BLOCK signal that
+        scripts/analyze.py's mergeability_signals() already computes and
+        passes in via the `process` argument. build_report() must not
+        re-derive process signals from raw evidence it's already been
+        given a canonical, richer version of — the `process` argument is
+        the single source of truth. This test locks in that build_report()
+        does not crash AND does not manufacture a second, redundant
+        signal of its own; the CI-failure signal is provided by the
+        caller instead (see test_reports_the_ci_failure_signal_the_caller_provided).
+        """
         checks = {
             "summary": {
                 "name": "CI",
@@ -613,15 +627,33 @@ class ReportAssemblyTests:
 
         report = build_report(**_build_report_inputs(checks=checks))
 
-        warnings = [
-            signal
-            for signal in report["process_signals"]
-            if signal.get("level") == "WARN"
+        # No signal was manufactured out of thin air by build_report()
+        # itself — the caller (process=[]) supplied none, so none appear.
+        assert report["process_signals"] == []
+
+    def test_reports_the_ci_failure_signal_the_caller_provided(self):
+        """The real CI-failure signal comes from the caller (in
+        production, analyze.py's mergeability_signals()) via the
+        `process` argument, not from build_report() re-deriving it."""
+        checks = {"summary": {"failures": 2}, "check_runs": []}
+        process = [
+            (
+                "BLOCK",
+                "2 completed CI check(s) reported failure; the PR is not "
+                "ready to merge until the failures are resolved or "
+                "explicitly explained.",
+            )
         ]
-        assert any(
-            "failure-like conclusions" in signal.get("message", "")
-            for signal in warnings
-        )
+
+        inputs = _build_report_inputs(checks=checks)
+        inputs["process"] = process
+        report = build_report(**inputs)
+
+        block_signals = [
+            s for s in report["process_signals"] if s.get("level") == "BLOCK"
+        ]
+        assert len(block_signals) == 1
+        assert "reported failure" in block_signals[0]["message"]
 
     def test_build_report_exposes_canonical_check_summaries(self):
         checks = {

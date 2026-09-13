@@ -1462,8 +1462,26 @@ _EXCLUDED_PRODUCTION_PREFIXES = (
 
 
 def _is_test_path(filename: str) -> bool:
+    """Return whether ``filename`` is a CPython test file.
+
+    CPython's test suite is not exclusively under ``Lib/test/`` — several
+    stdlib packages keep their own tests in a nested ``test/`` directory
+    (``Lib/ctypes/test/``, ``Lib/tkinter/test/``, ``Lib/sqlite3/test/``,
+    ``Lib/unittest/test/``) or a differently-named test directory
+    (``Lib/idlelib/idle_test/``). A narrower prefix-only check here
+    previously caused real test files in those locations to be
+    misclassified as "no test coverage," producing a false-positive
+    review prompt on PRs that did add tests. This mirrors the broader
+    (and correct) classification already used by policy.py's
+    ``file_signals`` for the same purpose — see CHANGELOG.md.
+    """
     normalized = filename.replace("\\", "/")
-    return normalized.startswith(_TEST_ROOTS)
+    if normalized.startswith(_TEST_ROOTS):
+        return True
+    if "/test/" in normalized or "/tests/" in normalized:
+        return True
+    basename = normalized.rsplit("/", 1)[-1]
+    return basename.startswith("test_")
 
 
 def _is_news_path(filename: str) -> bool:

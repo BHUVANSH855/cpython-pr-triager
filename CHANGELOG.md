@@ -145,7 +145,7 @@ testing surfaced this on its own.
   branch, so it predates this audit process, but it wasn't verified via
   `git blame` — stated here as "not one of ours," not as a verified fact.
 
-  **Why 650/650 passing tests and 90% coverage didn't catch it:** every
+  **Why 656/656 passing tests and 90% coverage didn't catch it:** every
   single test in `test_report.py` that exercises `build_report()` with a
   `checks` argument used `"failures": 0`, so the `if failures:` branch
   containing the bug was never executed by the test suite at all. This is
@@ -166,22 +166,110 @@ testing surfaced this on its own.
   bug (keyword argument not matching an actual dataclass field). No
   other instances found.
 
+- **Same live run surfaced a second, real accuracy bug: duplicate CI-
+  failure signals.** Once the crash above was fixed, the actual PR output
+  showed the same fact reported twice:
+
+  ```
+  [BLOCK] 1 completed CI check(s) reported failure; the PR is not ready to merge...
+  [WARN] 1 completed CI check(s) have failure-like conclusions.
+  ```
+
+  `build_report()` was independently re-deriving a CI-failure signal from
+  raw check data — the exact same computation `analyze.py`'s
+  `mergeability_signals()` already does more richly (correct BLOCK
+  severity, better message) and already passes in via the `process`
+  argument. Two code paths computing the same fact and both surfacing it
+  is the same class of problem the CLI/web-UI duplication findings in the
+  earlier audits were about, just at a smaller scope: `build_report()`
+  should treat `process` as its single source of truth for process
+  signals instead of also manufacturing its own from raw evidence it
+  wasn't authoritative over. Removed the duplicate derivation; added
+  tests asserting `build_report()` no longer invents signals on its own
+  and correctly surfaces exactly the signal(s) its caller supplies.
+
+  **This would not have been caught by re-reading the code** — both
+  branches were individually reasonable-looking. It only became visible
+  by reading real, rendered output from a real PR side by side.
+
 ### What this means for the "no real-PR validation yet" limitation
 
 This is the first real signal that the deterministic report path has now
 actually been exercised against live, non-synthetic GitHub API responses,
 and it immediately found something the test suite missed. That's a
 point in favor of continuing to run this against more real PRs — do not
-treat "650 tests pass" as equivalent to "this works," a point this file
+treat "656 tests pass" as equivalent to "this works," a point this file
 has made before and is now making with a concrete example instead of
 just a warning.
 
-## Known, currently-accepted limitations (as of Round 3)
+## Round 4 — real accuracy bug found by reading real PR output closely (not just checking for crashes)
+
+### Fixed
+
+- **`_is_test_path()` in `analyzers.py` missed real CPython test
+  directories, causing false "no test file changed" findings.** The
+  function only recognized `Lib/test/`, `Tools/test/`, and
+  `Modules/_testcapi/` as test locations. CPython actually keeps tests
+  for several stdlib packages in their own nested `test/` directory —
+  `Lib/ctypes/test/`, `Lib/tkinter/test/`, `Lib/sqlite3/test/`,
+  `Lib/unittest/test/` — or a differently-named one
+  (`Lib/idlelib/idle_test/`). A PR that added a real test file in any of
+  those locations would be misclassified as having zero test coverage,
+  producing a false-positive review prompt on a PR that did the right
+  thing. Confirmed directly against real paths before fixing (not just
+  inferred):
+
+  ```
+  'Lib/ctypes/test/test_values.py': analyzers.py says test=False   # wrong
+  'Lib/tkinter/test/test_tkinter/test_widgets.py': test=False      # wrong
+  'Lib/sqlite3/test/test_dbapi.py': test=False                     # wrong
+  'Lib/idlelib/idle_test/test_editor.py': test=False               # wrong
+  'Lib/unittest/test/test_case.py': test=False                     # wrong
+  'Lib/test/test_asyncio/test_tasks.py': test=True                 # only this one was right
+  ```
+
+  This is worse than the Round 3 findings: those were about the *same*
+  fact being reported redundantly or crashing outright. This one is two
+  independently-maintained classifiers (`analyzers.py`'s `_is_test_path`
+  vs `policy.py`'s broader, correct test-file detection in
+  `file_signals`) *disagreeing* on real inputs — meaning the tool could
+  actively mislead a maintainer into thinking test coverage was missing
+  when it wasn't. Fixed by broadening `_is_test_path` to match
+  `policy.py`'s semantics (nested `/test/`, `/tests/`, or a `test_`-
+  prefixed basename, not just a fixed prefix list).
+
+  **How this was found**: not by code review, and not by unit tests (none
+  existed for this function before this fix) — by reading real,
+  rendered CLI output against a real, open CPython PR (`#157349`) and
+  independently sanity-checking one of its findings against actual
+  CPython repository layout knowledge, rather than trusting that "the
+  tool ran without crashing" meant "the tool was right."
+
+  Added `TestPathClassificationTests` in `test_analyzers.py`: direct
+  unit tests for `_is_test_path` against real CPython paths, plus an
+  end-to-end test through `analyze_files()` proving no false-positive
+  "no test file changed" finding is produced when a nested-directory
+  test file is present. Verified these tests actually catch the original
+  bug by reverting the fix and confirming 6 of them fail with the exact
+  mismatch, then re-applying the fix and confirming all pass.
+
+### Noted but not changed
+
+- The same underlying "no test file changed" fact is still reported from
+  two places when it's genuinely true: a PR-level `[WARN]` process signal
+  (`policy.py`) and a file-level `[LOW]` technical finding
+  (`analyzers.py`), as seen in PR #157349's real output. Unlike the
+  Round 3 CI-failure case, these aren't verbatim-identical claims — one
+  is PR-wide, one names the specific file — so this was left as a
+  judgment call rather than deduplicated outright. Worth revisiting if a
+  maintainer using the tool finds it noisy in practice.
+
+## Known, currently-accepted limitations (as of Round 4)
 
 - The web UI (`index.html`) remains a separate, smaller implementation of
   the analysis rules from the Python CLI. Treat the CLI as authoritative;
   the web UI as a quick-look/demo tool. See `README.md`.
-- No real-world CPython PR benchmark exists yet. All 650 tests passing
+- No real-world CPython PR benchmark exists yet. All 656 tests passing
   and ~90% coverage demonstrate the implementation matches its own test
   fixtures — they do not demonstrate triage accuracy against real CPython
   PRs. Do not treat either number as evidence of the latter. (Round 3's
