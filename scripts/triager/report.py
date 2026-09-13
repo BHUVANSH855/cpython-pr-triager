@@ -546,7 +546,7 @@ def build_report(
     failures = _safe_int(check_summary.get("failures"))
     if failures:
         process_models.append(ProcessSignal(
-            signal="WARN",
+            level="WARN",
             message=f"{failures} completed CI check(s) have failure-like conclusions.",
         ))
 

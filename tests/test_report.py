@@ -587,6 +587,42 @@ def _build_report_inputs(
 
 
 class ReportAssemblyTests:
+    def test_build_report_warns_on_ci_failures_without_crashing(self):
+        """Regression test: build_report() used to construct
+        ProcessSignal(signal=..., ...) here, but the dataclass's actual
+        field is `level`, not `signal`. This branch is only reached when
+        checks["summary"]["failures"] is truthy, and every other test in
+        this file uses failures=0 — so this TypeError was never caught by
+        the test suite and only surfaced when running the CLI against a
+        real CPython PR that had a failing check. See CHANGELOG.md."""
+        checks = {
+            "summary": {
+                "name": "CI",
+                "status": "failure",
+                "available": 5,
+                "passed": 3,
+                "failed": 2,
+                "skipped": 0,
+                "failures": 2,
+            },
+            "check_runs": [
+                {"name": "test-a", "conclusion": "failure"},
+                {"name": "test-b", "conclusion": "success"},
+            ],
+        }
+
+        report = build_report(**_build_report_inputs(checks=checks))
+
+        warnings = [
+            signal
+            for signal in report["process_signals"]
+            if signal.get("level") == "WARN"
+        ]
+        assert any(
+            "failure-like conclusions" in signal.get("message", "")
+            for signal in warnings
+        )
+
     def test_build_report_exposes_canonical_check_summaries(self):
         checks = {
             "summary": {

@@ -127,12 +127,62 @@ were independently re-verified against this codebase before acting on them.
   stale description of the web UI's CODEOWNERS handling.
 - Added `LICENSE` (Apache-2.0).
 
-## Known, currently-accepted limitations (both rounds)
+## Round 3 — crash found by actually running the CLI against a real, live CPython PR
+
+This is the payoff of the "you need to run this against real PRs" advice
+repeated at the end of every previous round. First real run, first real
+crash, found in minutes — no amount of additional code review or unit
+testing surfaced this on its own.
+
+### Fixed
+
+- **`build_report()` crashed on any PR with a failing CI check.**
+  `report.py`'s CI-failure-warning branch called
+  `ProcessSignal(signal="WARN", message=...)`, but `ProcessSignal`'s
+  actual field is `level`, not `signal` (every other `ProcessSignal`
+  construction site in the codebase already used `level` correctly — this
+  one call site didn't). Nothing in Rounds 1–2 touched this specific
+  branch, so it predates this audit process, but it wasn't verified via
+  `git blame` — stated here as "not one of ours," not as a verified fact.
+
+  **Why 650/650 passing tests and 90% coverage didn't catch it:** every
+  single test in `test_report.py` that exercises `build_report()` with a
+  `checks` argument used `"failures": 0`, so the `if failures:` branch
+  containing the bug was never executed by the test suite at all. This is
+  a textbook case of the first audit's warning that coverage percentage
+  and coverage *of the paths that matter* are different things — 90%
+  coverage measured lines executed, not decision branches with real,
+  nonzero inputs.
+
+  Fixed the typo, and added
+  `test_build_report_warns_on_ci_failures_without_crashing`, which
+  exercises the branch with `"failures": 2` and would have caught this
+  immediately. Confirmed by reverting the fix and re-running the new
+  test alone: it fails with the exact same `TypeError` the user hit on
+  the real PR, then passes once the fix is back.
+
+- Also ran a mechanical sweep (AST-based, not manual) across every
+  dataclass constructor call site in `scripts/` for the same class of
+  bug (keyword argument not matching an actual dataclass field). No
+  other instances found.
+
+### What this means for the "no real-PR validation yet" limitation
+
+This is the first real signal that the deterministic report path has now
+actually been exercised against live, non-synthetic GitHub API responses,
+and it immediately found something the test suite missed. That's a
+point in favor of continuing to run this against more real PRs — do not
+treat "650 tests pass" as equivalent to "this works," a point this file
+has made before and is now making with a concrete example instead of
+just a warning.
+
+## Known, currently-accepted limitations (as of Round 3)
 
 - The web UI (`index.html`) remains a separate, smaller implementation of
   the analysis rules from the Python CLI. Treat the CLI as authoritative;
   the web UI as a quick-look/demo tool. See `README.md`.
-- No real-world CPython PR benchmark exists yet. All 649 tests passing
+- No real-world CPython PR benchmark exists yet. All 650 tests passing
   and ~90% coverage demonstrate the implementation matches its own test
   fixtures — they do not demonstrate triage accuracy against real CPython
-  PRs. Do not treat either number as evidence of the latter.
+  PRs. Do not treat either number as evidence of the latter. (Round 3's
+  crash is the concrete proof of that gap, not just an assertion of it.)
