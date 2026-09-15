@@ -1013,6 +1013,85 @@ def test_triage_report_rejects_malformed_evidence_completeness_dict():
         )
 
 
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("source", ""),
+        ("source", "   "),
+        ("file", ""),
+        ("file", "   "),
+        ("rule_id", ""),
+        ("rule_id", "   "),
+    ],
+)
+def test_finding_rejects_empty_source_and_optional_strings(field, value):
+    kwargs = {
+        "severity": "LOW",
+        "category": "source",
+        "message": "Review source.",
+        "confidence": "low",
+    }
+    kwargs[field] = value
+
+    with pytest.raises(ValueError, match=f"Finding\\.{field}"):
+        Finding(**kwargs)
+
+
+def test_process_signal_rejects_empty_source_and_rule_id():
+    with pytest.raises(ValueError, match="ProcessSignal.source"):
+        ProcessSignal(level="INFO", message="message", source=" ")
+
+    with pytest.raises(ValueError, match="ProcessSignal.rule_id"):
+        ProcessSignal(
+            level="INFO",
+            message="message",
+            rule_id=" ",
+        )
+
+
+def test_expert_context_normalizes_sample_size_and_activity_state():
+    from scripts.triager.models import ExpertContext
+
+    context = ExpertContext(
+        owner="@python/core",
+        file="Lib/socket.py",
+        pattern="Lib/*.py",
+        approval_rate_sample_size="-4",
+        activity_unavailable=1,
+        activity_error=None,
+    )
+
+    assert context.approval_rate_sample_size == 0
+    assert context.activity_unavailable is True
+
+
+def test_expert_context_rejects_non_string_activity_error():
+    from scripts.triager.models import ExpertContext
+
+    with pytest.raises(TypeError, match="ExpertContext.activity_error"):
+        ExpertContext(
+            owner="@python/core",
+            file="Lib/socket.py",
+            pattern="Lib/*.py",
+            activity_error=123,
+        )
+
+
+def test_expert_context_drops_negative_response_days():
+    from scripts.triager.models import ExpertContext
+
+    context = ExpertContext(
+        owner="@python/core",
+        file="Lib/socket.py",
+        pattern="Lib/*.py",
+        typical_response_days=-1,
+    )
+
+    assert context.typical_response_days is None
+
+
 def test_default_lists_are_independent():
     first = TriageReport(
         schema_version="1.1",

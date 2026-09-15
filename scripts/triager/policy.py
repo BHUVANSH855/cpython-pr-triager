@@ -366,126 +366,261 @@ def file_signals(
     return names, tests, news, docs
 
 
+def build_review_state(
+    pr: dict[str, Any],
+    reviews: list[dict[str, Any]] | None = None,
+    timeline: list[dict[str, Any]] | None = None,
+    review_threads: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Reconstruct review state without treating raw review counts as readiness.
+
+    Approval validity is intentionally conservative: a review submitted for an
+    older commit is reported as a stale *candidate*, not automatically invalid,
+    because whether GitHub dismisses stale approvals is a branch-policy setting.
+    """
+    reviews = [item for item in (reviews or []) if isinstance(item, dict)]
+    timeline = [item for item in (timeline or []) if isinstance(item, dict)]
+    head_sha = str((pr.get("head") or {}).get("sha") or "").strip() or None
+    author = str(((pr.get("user") or {}).get("login")) or pr.get("author_login") or "").strip()
+
+    review_events = [
+        item for item in reviews
+        if not item.get("bot") and str(item.get("state") or "").strip()
+    ]
+    if not review_events:
+        review_events = [
+            item for item in timeline
+            if not item.get("bot")
+            and item.get("kind") == "review"
+            and str(item.get("state") or "").strip()
+        ]
+
+    def event_date(item: dict[str, Any]) -> str:
+        return str(
+            item.get("submitted_at")
+            or item.get("date")
+            or item.get("created_at")
+            or ""
+        )
+
+    # GitHub review lists are chronological, but sorting here makes the
+    # reconstruction deterministic even when a provider/test fixture is not.
+    review_events = sorted(review_events, key=event_date)
+
+    by_reviewer: dict[str, list[dict[str, Any]]] = {}
+    for review in review_events:
+        user = review.get("user")
+        login = review.get("login")
+        if isinstance(user, dict):
+            login = user.get("login") or login
+        login = str(login or "").strip()
+        if login:
+            by_reviewer.setdefault(login, []).append(review)
+
+    effective_approvals: list[dict[str, Any]] = []
+    effective_changes: list[dict[str, Any]] = []
+    dismissed: list[dict[str, Any]] = []
+    stale_candidates: list[dict[str, Any]] = []
+
+    for login, events in by_reviewer.items():
+        substantive = [
+            item for item in events
+            if str(item.get("state") or "").upper()
+            in {"APPROVED", "CHANGES_REQUESTED", "DISMISSED"}
+        ]
+        latest = substantive[-1] if substantive else None
+        if latest is None:
+            continue
+        state = str(latest.get("state") or "").upper()
+        if state == "APPROVED":
+            effective_approvals.append(latest)
+            commit_id = latest.get("commit_id") or latest.get("head_sha")
+            if head_sha and isinstance(commit_id, str) and commit_id:
+                if commit_id != head_sha:
+                    stale_candidates.append({
+                        "login": login,
+                        "review_id": latest.get("id"),
+                        "commit_id": commit_id,
+                        "head_sha": head_sha,
+                    })
+        elif state == "CHANGES_REQUESTED":
+            effective_changes.append(latest)
+        elif state == "DISMISSED":
+            dismissed.append(latest)
+
+    # Some dismissal events are only present on the timeline. They invalidate
+    # the associated review without requiring us to infer from comment text.
+    dismissed_ids = {
+        str(item.get("review_id"))
+        for item in timeline
+        if item.get("event") == "review_dismissed"
+        and item.get("review_id") is not None
+    }
+    effective_approvals = [
+        item for item in effective_approvals
+        if str(item.get("id")) not in dismissed_ids
+    ]
+
+    thread_status = "not_collected"
+    unresolved_threads = 0
+    resolved_threads = 0
+    latest_unresolved_thread = None
+    if isinstance(review_threads, dict):
+        thread_status = str(review_threads.get("status") or "unknown")
+        threads = review_threads.get("threads")
+        if isinstance(threads, list) and thread_status == "complete":
+            valid_threads = [item for item in threads if isinstance(item, dict)]
+            unresolved = [item for item in valid_threads if not bool(item.get("is_resolved"))]
+            unresolved_threads = len(unresolved)
+            resolved_threads = len(valid_threads) - unresolved_threads
+            if unresolved:
+                latest_unresolved_thread = max(
+                    unresolved,
+                    key=lambda item: str(item.get("created_at") or ""),
+                )
+
+    latest_changes = max(
+        effective_changes,
+        key=event_date,
+        default=None,
+    )
+    author_followup = False
+    if latest_changes is not None:
+        change_date = event_date(latest_changes)
+        later_human = [
+            item for item in timeline
+            if not item.get("bot")
+            and str(item.get("date") or item.get("created_at") or "") > change_date
+        ]
+        if author:
+            author_followup = any(
+                str(item.get("login") or "").strip() == author
+                for item in later_human
+            )
+        else:
+            # Preserve the historical signal when PR author identity is not
+            # present in a fixture/provider response: later human activity
+            # still means the old "no follow-up" condition is no longer true.
+            author_followup = bool(later_human)
+
+    return {
+        "status": "complete",
+        "human_review_count": len(review_events),
+        "effective_approval_count": len(effective_approvals),
+        "effective_changes_requested_count": len(effective_changes),
+        "dismissed_review_count": len(dismissed) + len(dismissed_ids),
+        "stale_approval_candidates": stale_candidates,
+        "unresolved_threads": unresolved_threads,
+        "resolved_threads": resolved_threads,
+        "latest_unresolved_thread": latest_unresolved_thread,
+        "review_threads_status": thread_status,
+        "latest_changes_requested": latest_changes,
+        "author_followup_after_changes_requested": author_followup,
+        "approval_freshness": (
+            "stale_candidate" if stale_candidates
+            else "fresh_or_unverified" if effective_approvals
+            else "none"
+        ),
+    }
+
+
 def review_signals(
     pr: dict[str, Any],
     timeline: list[dict[str, Any]],
+    reviews: list[dict[str, Any]] | None = None,
+    review_threads: dict[str, Any] | None = None,
 ) -> list[tuple[str, str]]:
-    human = [
-        event
-        for event in timeline
-        if isinstance(event, dict) and not event.get("bot")
-    ]
-
-    approvals = [
-        event
-        for event in human
-        if (
-            event.get("kind") == "review"
-            and str(event.get("state") or "").upper() == "APPROVED"
-        )
-    ]
-
-    changes = [
-        event
-        for event in human
-        if (
-            event.get("kind") == "review"
-            and str(event.get("state") or "").upper() == "CHANGES_REQUESTED"
-        )
-    ]
-
+    state = build_review_state(
+        pr, reviews=reviews, timeline=timeline, review_threads=review_threads
+    )
     signals: list[tuple[str, str]] = []
 
-    if approvals:
-        signals.append(
-            (
-                "OK",
-                f"{len(approvals)} human approval review(s) recorded.",
-            )
-        )
+    if state["effective_approval_count"]:
+        signals.append((
+            "OK",
+            f"{state['effective_approval_count']} effective human approval review(s) recorded.",
+        ))
 
-    if changes:
-        latest = max(
-            changes,
-            key=lambda event: str(event.get("date") or ""),
-        )
-
-        latest_date = str(latest.get("date") or "")
-
-        later_human_activity = [
-            event
-            for event in human
-            if str(event.get("date") or "") > latest_date
-        ]
-
-        if later_human_activity:
-            signals.append(
-                (
-                    "INFO",
-                    f"Changes were requested by "
-                    f"@{latest.get('login', '?')}; later human activity "
-                    "exists, but the requested changes should still be "
-                    "verified as addressed.",
-                )
-            )
+    if state["effective_changes_requested_count"]:
+        latest = state["latest_changes_requested"] or {}
+        if state["author_followup_after_changes_requested"]:
+            signals.append((
+                "INFO",
+                f"Changes were requested by @{latest.get('login', '?')}; later author activity exists, but the requested changes should still be verified as addressed.",
+            ))
         else:
-            signals.append(
-                (
-                    "WARN",
-                    f"Latest changes-requested review is by "
-                    f"@{latest.get('login', '?')} with no later human "
-                    "activity.",
-                )
-            )
+            signals.append((
+                "WARN",
+                f"Latest changes-requested review is by @{latest.get('login', '?')} with no later author follow-up; verify that requested changes are addressed.",
+            ))
+
+    if state["unresolved_threads"]:
+        signals.append((
+            "WARN",
+            f"{state['unresolved_threads']} unresolved review thread(s) remain; review thread state before treating the PR as ready.",
+        ))
+    elif state["review_threads_status"] in {"unavailable", "failed", "partial"}:
+        signals.append((
+            "WARN",
+            "Review-thread resolution state is not fully available; readiness cannot be established from thread state.",
+        ))
+
+    if state["stale_approval_candidates"]:
+        signals.append((
+            "INFO",
+            f"{len(state['stale_approval_candidates'])} approval(s) were submitted for an older commit than the current PR head; whether they are invalid depends on the repository's stale-review policy.",
+        ))
 
     if pr.get("state") == "open":
-        dates = [
-            str(event.get("date"))
-            for event in human
-            if event.get("date")
+        human = [
+            event
+            for event in timeline
+            if (
+                isinstance(event, dict)
+                and not event.get("bot")
+                and event.get("date")
+            )
         ]
+        dates = [str(event.get("date")) for event in human]
 
-        if not dates and pr.get("updated_at"):
+        used_updated_at = not dates and bool(pr.get("updated_at"))
+
+        if used_updated_at:
             age = _iso_age_days(str(pr["updated_at"]))
+        else:
+            age = _iso_age_days(max(dates)) if dates else None
 
-            if age is not None:
-                if age > 90:
-                    signals.append(
-                        (
-                            "WARN",
-                            f"PR has not been updated for about {age:.0f} "
-                            "days; review whether follow-up is appropriate.",
-                        )
-                    )
-                elif age > 30:
-                    signals.append(
-                        (
-                            "INFO",
-                            f"PR has not been updated for about {age:.0f} "
-                            "days; follow-up may be appropriate.",
-                        )
-                    )
-        elif dates:
-            latest_date = max(dates)
-            age = _iso_age_days(latest_date)
-
-            if age is not None:
-                if age > 90:
-                    signals.append(
-                        (
-                            "WARN",
-                            f"No human activity for about {age:.0f} days; "
-                            "review whether follow-up is appropriate.",
-                        )
-                    )
-                elif age > 30:
-                    signals.append(
-                        (
-                            "INFO",
-                            f"No human activity for about {age:.0f} days; "
-                            "follow-up may be appropriate.",
-                        )
-                    )
+        if age is not None:
+            if age > 90:
+                if used_updated_at:
+                    signals.append((
+                        "WARN",
+                        f"No human activity for about {age:.0f} days; "
+                        "the inactivity age is based on the PR updated_at "
+                        "timestamp because no human timeline activity was "
+                        "available. Review whether follow-up is appropriate.",
+                    ))
+                else:
+                    signals.append((
+                        "WARN",
+                        f"No human activity for about {age:.0f} days; "
+                        "review whether follow-up is appropriate.",
+                    ))
+            elif age > 30:
+                if used_updated_at:
+                    signals.append((
+                        "INFO",
+                        f"No human activity for about {age:.0f} days; "
+                        "the inactivity age is based on the PR updated_at "
+                        "timestamp because no human timeline activity was "
+                        "available. Follow-up may be appropriate.",
+                    ))
+                else:
+                    signals.append((
+                        "INFO",
+                        f"No human activity for about {age:.0f} days; "
+                        "follow-up may be appropriate.",
+                    ))
 
     return signals
 
@@ -699,6 +834,8 @@ def process_signals(
     timeline: list[dict[str, Any]],
     labels: list[str],
     patterns: dict[str, Any] | None,
+    reviews: list[dict[str, Any]] | None = None,
+    review_threads: dict[str, Any] | None = None,
 ) -> tuple[list[tuple[str, str]], list[str]]:
     signals: list[tuple[str, str]] = []
 
@@ -951,7 +1088,7 @@ def process_signals(
     )
 
     signals.extend(branch)
-    signals.extend(review_signals(pr, timeline))
+    signals.extend(review_signals(pr, timeline, reviews=reviews, review_threads=review_threads))
 
     return signals, backports
 

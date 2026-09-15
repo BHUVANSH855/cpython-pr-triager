@@ -51,14 +51,14 @@ class CRulesTests(unittest.TestCase):
         sp = next(f for f in findings if f.rule_id == "c-unsafe-sprintf")
         self.assertEqual(sp.severity, "CRITICAL")
 
-    def test_malloc_high(self):
+    def test_malloc_is_low_confidence_review_prompt(self):
         """FIX (point 13)."""
         findings = analyze_patch("Objects/foo.c", "@@ -0 +1 @@\n+ptr = malloc(64);")
         ids = [f.rule_id for f in findings]
         self.assertIn("c-raw-malloc", ids)
         m = next(f for f in findings if f.rule_id == "c-raw-malloc")
-        self.assertEqual(m.severity, "HIGH")
-        self.assertIn("PyMem_Malloc", m.message)
+        self.assertEqual(m.severity, "LOW")
+        self.assertIn("allocation domain", m.message)
 
     def test_free_high(self):
         """FIX (point 13)."""
@@ -271,7 +271,7 @@ class RefcountTests(unittest.TestCase):
             if f.rule_id == "refcount-decref-before-return"
         ]
         self.assertEqual(len(matches), 1)
-        self.assertEqual(matches[0].severity, "HIGH")
+        self.assertEqual(matches[0].severity, "MEDIUM")
         self.assertIn("obj", matches[0].message)
 
     def test_double_decref_fires(self):
@@ -285,7 +285,7 @@ class RefcountTests(unittest.TestCase):
             if f.rule_id == "refcount-double-decref"
         ]
         self.assertEqual(len(matches), 1)
-        self.assertEqual(matches[0].severity, "HIGH")
+        self.assertEqual(matches[0].severity, "MEDIUM")
         self.assertIn("double DECREF", matches[0].message)
 
     def test_different_decrefs_do_not_fire_double_decref(self):

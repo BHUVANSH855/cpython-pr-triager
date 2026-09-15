@@ -10,7 +10,6 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-
 SOURCE_URL = "https://devguide.python.org/versions/"
 DEFAULT_OUTPUT = (
     Path(__file__).resolve().parents[1] / "data" / "branch-policy.json"
@@ -145,7 +144,7 @@ def build_snapshot(
         "source": SOURCE_URL,
         "retrieved_at": (
             retrieved_at
-            or dt.datetime.now(dt.timezone.utc)
+            or dt.datetime.now(dt.UTC)
             .replace(microsecond=0)
             .isoformat()
             .replace("+00:00", "Z")

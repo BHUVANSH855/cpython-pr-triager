@@ -12,7 +12,6 @@ from scripts.triager.ai import (
     synthesize,
 )
 
-
 VALID_RESULT = {
     "triage": "READY_FOR_MAINTAINER_REVIEW",
     "confidence": 4,

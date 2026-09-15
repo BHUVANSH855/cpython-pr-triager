@@ -315,9 +315,8 @@ class RefreshTests(unittest.TestCase):
             with patch(
                 "scripts.update_branch_policy.fetch_source",
                 return_value=html,
-            ):
-                with self.assertRaises(ValueError):
-                    update_branch_policy.refresh(output)
+            ), self.assertRaises(ValueError):
+                update_branch_policy.refresh(output)
 
             self.assertFalse(output.exists())
 

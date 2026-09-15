@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import datetime as dt
 import json
 import os
@@ -35,6 +36,7 @@ from scripts.triager.codeowners import (
 from scripts.triager.github import GitHub as TriagerGitHub
 from scripts.triager.policy import (
     branch_and_backport_signals as policy_branch_signals,
+    build_review_state as policy_build_review_state,
 )
 
 # FIX (point 6): import all policy functions from policy.py — no local copies.
@@ -474,8 +476,9 @@ def collect_historical_sample(gh, count, seed=0):
 
     if len(candidates) > count:
         step = len(candidates) / count
+        offset = seed % len(candidates)
         selected = [
-            candidates[min(int(i * step), len(candidates) - 1)]
+            candidates[min((offset + int(i * step)) % len(candidates), len(candidates) - 1)]
             for i in range(count)
         ]
     else:
@@ -510,7 +513,7 @@ def collect_historical_sample(gh, count, seed=0):
             )
 
     return {
-        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "generated_at": dt.datetime.now(dt.UTC).isoformat(),
         "repo": REPO,
         "requested": count,
         "candidate_population": len(candidates),
@@ -569,8 +572,10 @@ def summarize_labels(labels, metadata):
 # triager.review_signals() without changes.
 # ---------------------------------------------------------------------------
 
-def review_signals(pr, timeline):
-    return policy_review_signals(pr, timeline)
+def review_signals(pr, timeline, reviews=None, review_threads=None):
+    return policy_review_signals(
+        pr, timeline, reviews=reviews, review_threads=review_threads
+    )
 
 
 def branch_and_backport_signals(pr, labels):
@@ -589,229 +594,544 @@ def disposition(process, findings, evidence=None):
 # CI check summary
 # ---------------------------------------------------------------------------
 
-def build_checks(gh, pr, evidence=None):
-    """
-    Build a CI summary from the collected evidence when available.
+def _normalise_commit_status(value, head_sha=None):
+    """Normalize /statuses output into combined-state evidence."""
+    if isinstance(value, dict):
+        state=value.get("state"); state=state.strip().lower() if isinstance(state,str) else None
+        sha=value.get("sha") or value.get("head_sha")
+        statuses=value.get("statuses") if isinstance(value.get("statuses"),list) else []
+        return {"state": state or None, "sha": sha if isinstance(sha,str) and sha else None, "statuses": statuses}
+    if not isinstance(value, list): return None
+    statuses=[item for item in value if isinstance(item,dict)]
+    shas={item.get("sha") for item in statuses if isinstance(item.get("sha"),str) and item.get("sha")}
+    if not statuses: state=None
+    else:
+        states={str(item.get("state") or "").strip().lower() for item in statuses}
+        if "failure" in states or "error" in states: state="failure"
+        elif "pending" in states: state="pending"
+        elif states <= {"success"}: state="success"
+        else: state="unknown"
+    sha=(next(iter(shas)) if len(shas)==1 else None)
+    return {"state": state, "sha": sha, "statuses": statuses}
 
-    The optional ``evidence`` argument preserves the legacy two-argument
-    API while allowing report assembly to reuse the original evidence
-    snapshot without issuing duplicate GitHub requests.
+
+def _check_freshness(run, head_sha):
+    run_sha=run.get("head_sha") or run.get("sha") if isinstance(run,dict) else None
+    if not isinstance(run_sha,str) or not run_sha or not head_sha: return "unknown"
+    return "fresh" if run_sha == head_sha else "stale"
+
+
+def _normalise_requiredness(run, required_checks=None):
+    """Classify a check run without allowing run metadata to override policy.
+
+    When authoritative branch-protection/ruleset evidence is complete, that
+    policy is the source of truth. A check-run's own ``required`` or
+    ``requiredness`` field is not authoritative and must not be allowed to
+    contradict it.
+
+    When authoritative policy is unavailable or incomplete, explicit
+    run-level metadata may still be preserved as a lower-confidence
+    classification.
     """
-    head_sha = (pr.get("head") or {}).get("sha")
+    name = (
+        (run.get("name") or run.get("check_run_name"))
+        if isinstance(run, dict)
+        else None
+    )
+
+    if not isinstance(name, str) or not name.strip():
+        return "unknown"
+
+    if isinstance(required_checks, dict):
+        policy_status = str(
+            required_checks.get("status") or ""
+        ).strip().lower()
+
+        policies = required_checks.get("required_checks")
+        if policy_status == "complete" and isinstance(policies, list):
+            for policy in policies:
+                if not isinstance(policy, dict):
+                    continue
+
+                policy_name = policy.get("name")
+                if (
+                    isinstance(policy_name, str)
+                    and policy_name == name
+                ):
+                    return "required"
+
+            # Complete authoritative policy establishes that this named
+            # check is not required if it is absent from the policy.
+            return "optional"
+
+    elif isinstance(required_checks, (set, frozenset, list, tuple)):
+        for policy in required_checks:
+            policy_name = (
+                policy.get("name")
+                if isinstance(policy, dict)
+                else policy
+            )
+            if (
+                isinstance(policy_name, str)
+                and policy_name == name
+            ):
+                return "required"
+
+        return "optional"
+
+    # No complete authoritative policy is available. Preserve explicit
+    # run-level metadata, but do not present it as authoritative policy.
+    if isinstance(run, dict):
+        raw = run.get("required")
+        if isinstance(raw, bool):
+            return "required" if raw else "optional"
+
+        raw = run.get("requiredness")
+        if isinstance(raw, str):
+            raw = raw.strip().lower()
+            if raw in {"required", "optional"}:
+                return raw
+            if raw in {"info", "informational"}:
+                return "optional"
+
+    return "unknown"
+
+
+def _check_run_recency_key(run):
+    """Return a deterministic ordering key for duplicate check runs.
+
+    GitHub check-run responses contain timestamps and stable numeric IDs.
+    Never rely on the order in which an API response happens to list runs.
+
+    ``started_at`` is the primary signal because a newer rerun may still be
+    pending. ``completed_at`` is a fallback for records without a start time,
+    and the numeric check-run ID is the final deterministic tiebreaker.
+    """
+    if not isinstance(run, dict):
+        return ("", "", -1)
+
+    started_at = run.get("started_at")
+    completed_at = run.get("completed_at")
+
+    def normalise_timestamp(value):
+        if not isinstance(value, str) or not value.strip():
+            return ""
+
+        try:
+            parsed = dt.datetime.fromisoformat(
+                value.replace("Z", "+00:00")
+            )
+        except (TypeError, ValueError):
+            return value
+
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=dt.timezone.utc)
+
+        return parsed.astimezone(dt.timezone.utc).isoformat()
+
+    run_id = run.get("id")
+    if isinstance(run_id, bool):
+        run_id = -1
+    elif isinstance(run_id, int):
+        pass
+    elif isinstance(run_id, str):
+        try:
+            run_id = int(run_id)
+        except ValueError:
+            run_id = -1
+    else:
+        run_id = -1
+
+    return (
+        normalise_timestamp(started_at),
+        normalise_timestamp(completed_at),
+        run_id,
+    )
+
+
+def _latest_check_run(runs):
+    """Select the newest check run deterministically.
+
+    This intentionally does not prefer completed runs. A newer queued or
+    in-progress rerun supersedes an older successful run for the purpose of
+    determining the current CI state.
+    """
+    candidates = [
+        run for run in runs
+        if isinstance(run, dict)
+    ]
+
+    if not candidates:
+        return None
+
+    return max(candidates, key=_check_run_recency_key)
+
+
+def _run_app_id(run):
+    """Extract the check-run integration/app id when GitHub supplied it."""
+    if not isinstance(run, dict):
+        return None
+    direct = run.get("app_id")
+    if direct is not None:
+        return direct
+    app = run.get("app")
+    if isinstance(app, dict):
+        return app.get("id")
+    return None
+
+
+def _required_policy_records(required_checks):
+    if not isinstance(required_checks, dict):
+        return []
+    values = required_checks.get("required_checks")
+    if not isinstance(values, list):
+        return []
+    return [
+        item for item in values
+        if isinstance(item, dict)
+        and isinstance(item.get("name"), str)
+        and item.get("name").strip()
+    ]
+
+
+def _required_check_match(run, policy):
+    """Return true/false/unknown for one run against one required rule."""
+    if not isinstance(run, dict) or not isinstance(policy, dict):
+        return False
+    if run.get("name") != policy.get("name"):
+        return False
+    required_app = policy.get("integration_id")
+    if required_app is None:
+        return True
+    actual_app = _run_app_id(run)
+    if actual_app is None:
+        return None
+    return actual_app == required_app
+
+
+def _legacy_status_matches(status, policy, head_sha):
+    """Find a current-head legacy status matching a required context."""
+    if not isinstance(status, dict) or not isinstance(policy, dict):
+        return False
+    statuses = status.get("statuses")
+    if not isinstance(statuses, list):
+        return False
+    required_app = policy.get("integration_id")
+    for item in statuses:
+        if not isinstance(item, dict):
+            continue
+        if item.get("context") != policy.get("name"):
+            continue
+        sha = item.get("sha") or status.get("sha")
+        if sha != head_sha:
+            continue
+        if required_app is not None:
+            # Legacy commit statuses do not carry a check-run app identity.
+            continue
+        return True
+    return False
+
+
+def _evaluate_required_checks(runs, status, required_checks, head_sha):
+    """Evaluate every authoritative required check without guessing absence."""
+    policies = _required_policy_records(required_checks)
+    policy_status = (
+        str(required_checks.get("status") or "").lower()
+        if isinstance(required_checks, dict) else ""
+    )
+    if not policies or policy_status != "complete":
+        totals = Counter()
+        for run in runs:
+            if run.get("requiredness") != "required":
+                continue
+            freshness = run.get("freshness")
+            if freshness == "stale":
+                totals["required_stale"] += 1
+                continue
+            if freshness != "fresh":
+                totals["required_unknown"] += 1
+                continue
+            if run.get("status") != "completed":
+                totals["required_pending"] += 1
+                continue
+            conclusion = str(run.get("conclusion") or "").lower()
+            if conclusion in {"success", "skipped", "neutral"}:
+                totals["required_satisfied"] += 1
+            elif conclusion == "failure":
+                totals["required_failed"] += 1
+            elif conclusion == "cancelled":
+                totals["required_cancelled"] += 1
+            elif conclusion == "action_required":
+                totals["required_action_required"] += 1
+            elif conclusion == "timed_out":
+                totals["required_timed_out"] += 1
+            elif conclusion == "stale":
+                totals["required_stale"] += 1
+            else:
+                totals["required_unknown"] += 1
+        totals["required_policy_complete"] = policy_status == "complete"
+        return dict(totals)
+
+    totals = Counter()
+    for policy in policies:
+        candidates = []
+        unknown_match = False
+        for run in runs:
+            match = _required_check_match(run, policy)
+            if match is True:
+                candidates.append(run)
+            elif match is None:
+                unknown_match = True
+
+        # A current-head legacy status can satisfy a context-only requirement.
+        if _legacy_status_matches(status, policy, head_sha):
+            candidates.append({
+                "status": "completed",
+                "conclusion": "success",
+                "freshness": "fresh",
+                "name": policy["name"],
+                "source": "legacy_status",
+            })
+
+        current = [r for r in candidates if r.get("freshness") == "fresh"]
+        stale = [r for r in candidates if r.get("freshness") == "stale"]
+
+        if not current:
+            unknown_freshness = any(
+                r.get("freshness") == "unknown" for r in candidates
+            )
+            if unknown_match or unknown_freshness:
+                totals["required_unknown"] += 1
+            elif stale:
+                totals["required_stale"] += 1
+            else:
+                totals["required_missing"] += 1
+            continue
+
+        # Select the newest current-head run deterministically.
+        #
+        # Do not prefer an older completed success over a newer pending
+        # rerun. A rerun changes the effective CI state even when the older
+        # run succeeded.
+        selected = _latest_check_run(current)
+        if selected.get("status") != "completed":
+            totals["required_pending"] += 1
+            continue
+
+        conclusion = str(selected.get("conclusion") or "").lower()
+        if conclusion in {"success", "skipped", "neutral"}:
+            totals["required_satisfied"] += 1
+        elif conclusion == "failure":
+            totals["required_failed"] += 1
+        elif conclusion == "cancelled":
+            totals["required_cancelled"] += 1
+        elif conclusion == "action_required":
+            totals["required_action_required"] += 1
+        elif conclusion == "timed_out":
+            totals["required_timed_out"] += 1
+        elif conclusion == "stale":
+            totals["required_stale"] += 1
+        else:
+            totals["required_unknown"] += 1
+
+    totals["required_policy_complete"] = True
+    return dict(totals)
+
+
+def build_checks(gh, pr, evidence=None):
+    """Build CI evidence while preserving current-head and policy uncertainty."""
+    head_sha = (pr.get("head") or {}).get("sha") if isinstance(pr, dict) else None
     if not head_sha:
         return {"available": False, "reason": "No PR head SHA."}
 
     evidence = evidence if isinstance(evidence, dict) else {}
-
-    existing_check_runs = evidence.get("check_runs")
-    existing_statuses = evidence.get("statuses")
-
-    has_check_evidence = (
-        isinstance(existing_check_runs, dict)
-        and isinstance(existing_check_runs.get("check_runs"), list)
+    raw_container = evidence.get("check_runs")
+    raw_status = evidence.get("statuses")
+    required_checks = evidence.get("required_checks")
+    have_runs = (
+        isinstance(raw_container, dict)
+        and isinstance(raw_container.get("check_runs"), list)
     )
-    has_status_evidence = isinstance(existing_statuses, list)
+    have_status = isinstance(raw_status, (dict, list))
+    raw_runs = raw_container.get("check_runs", []) if have_runs else []
+
+    def normalise(items):
+        out = []
+        for raw in items if isinstance(items, list) else []:
+            if isinstance(raw, dict):
+                run = dict(raw)
+                run["freshness"] = _check_freshness(run, head_sha)
+                run["requiredness"] = _normalise_requiredness(
+                    run, required_checks
+                )
+                out.append(run)
+        return out
 
     result = {
         "available": True,
         "head_sha": head_sha,
-        "check_runs": (
-            existing_check_runs.get("check_runs", [])
-            if has_check_evidence
-            else []
-        ),
-        "status": existing_statuses if has_status_evidence else None,
+        "pr_head_sha": head_sha,
+        "check_runs": normalise(raw_runs),
+        "status": None,
     }
-
-    if not has_check_evidence:
+    if isinstance(raw_status, (dict, list)):
+        result["status"] = _normalise_commit_status(raw_status, head_sha)
+    if not have_runs:
         try:
-            result["check_runs"] = gh.checks(head_sha)
+            result["check_runs"] = normalise(gh.checks(head_sha))
         except Exception as exc:
             result["checks_error"] = str(exc)
-
-    if not has_status_evidence:
+    if not have_status:
         try:
-            result["status"] = gh.statuses(head_sha)
+            result["status"] = _normalise_commit_status(gh.statuses(head_sha), head_sha)
         except Exception as exc:
             result["status_error"] = str(exc)
 
-    conclusions = [
-        item.get("conclusion")
-        for item in result["check_runs"]
-        if isinstance(item, dict) and item.get("status") == "completed"
-    ]
-
-    # CI-freshness validation (independent of the request that fetched the
-    # data): confirm every returned check run actually belongs to the
-    # PR's current head SHA rather than trusting the request parameters
-    # alone. This protects against stale/reused evidence (e.g. a cached
-    # snapshot collected against an earlier commit) silently being
-    # reported as current CI state.
-    stale_check_shas = sorted({
-        run.get("head_sha")
-        for run in result["check_runs"]
-        if isinstance(run, dict)
-        and run.get("head_sha")
-        and run.get("head_sha") != head_sha
+    runs = result["check_runs"]
+    values = [r["freshness"] for r in runs]
+    freshness = (
+        "unknown" if not runs
+        else "stale" if "stale" in values
+        else "fresh" if all(v == "fresh" for v in values)
+        else "unknown"
+    )
+    result["ci_freshness"] = freshness
+    result["ci_fresh"] = (
+        True if freshness == "fresh"
+        else False if runs
+        else None
+    )
+    stale_shas = sorted({
+        (r.get("head_sha") or r.get("sha"))
+        for r in runs
+        if r.get("freshness") == "stale"
+        and (r.get("head_sha") or r.get("sha"))
     })
-    result["pr_head_sha"] = head_sha
-    result["ci_fresh"] = not stale_check_shas if result["check_runs"] else None
-    if stale_check_shas:
-        result["stale_check_shas"] = stale_check_shas
+    if stale_shas:
+        result["stale_check_shas"] = stale_shas
 
+    completed = [r for r in runs if r.get("status") == "completed"]
+    conclusions = [r.get("conclusion") for r in completed]
+    failures = sum(c == "failure" for c in conclusions)
+    timed_out = sum(c == "timed_out" for c in conclusions)
+    cancelled = sum(c == "cancelled" for c in conclusions)
+    action_required = sum(c == "action_required" for c in conclusions)
+    successes = sum(c in {"success", "neutral", "skipped"} for c in conclusions)
+
+    required_eval = _evaluate_required_checks(
+        runs, result.get("status"), required_checks, head_sha
+    )
+
+    status = result.get("status")
+    legacy = status.get("state") if isinstance(status, dict) else None
+    status_sha = status.get("sha") if isinstance(status, dict) else None
+    legacy_freshness = (
+        "fresh" if status_sha == head_sha
+        else "stale" if status_sha
+        else "unknown"
+    )
+    result["legacy_status_freshness"] = legacy_freshness
+    result["required_checks"] = required_checks
     result["summary"] = {
-        "check_runs": len(result["check_runs"]),
-        "completed": sum(
-            run.get("status") == "completed"
-            for run in result["check_runs"]
-            if isinstance(run, dict)
+        "check_runs": len(runs),
+        "completed": len(completed),
+        "successes": successes,
+        "failures": failures,
+        "timed_out": timed_out,
+        "cancelled": cancelled,
+        "action_required": action_required,
+        "pending": len(runs) - len(completed),
+        "required_failures": (
+            required_eval.get("required_failed", 0)
+            + required_eval.get("required_timed_out", 0)
+            + required_eval.get("required_action_required", 0)
         ),
-        "failures": sum(
-            conclusion in {
-                "failure",
-                "timed_out",
-                "cancelled",
-                "action_required",
+        "required_cancelled": required_eval.get("required_cancelled", 0),
+        "required_pending": required_eval.get("required_pending", 0),
+        "required_missing": required_eval.get("required_missing", 0),
+        "required_stale": required_eval.get("required_stale", 0),
+        "required_satisfied": required_eval.get("required_satisfied", 0),
+        "required_unknown": required_eval.get("required_unknown", 0),
+        "required_policy_complete": required_eval.get("required_policy_complete", False),
+        "unknown_outcomes": sum(
+            c not in {
+                "success", "neutral", "skipped", "failure", "timed_out",
+                "cancelled", "action_required", "stale",
             }
-            for conclusion in conclusions
+            for c in conclusions
         ),
-        "successes": sum(
-            conclusion in {"success", "neutral", "skipped"}
-            for conclusion in conclusions
+        "unknown_requiredness": sum(
+            r.get("requiredness") == "unknown" for r in runs
         ),
         "pr_head_sha": head_sha,
         "ci_fresh": result["ci_fresh"],
+        "ci_freshness": freshness,
+        "legacy_status": legacy,
+        "legacy_status_freshness": legacy_freshness,
     }
-
-    if isinstance(result["status"], dict):
-        result["summary"]["legacy_status"] = result["status"].get("state")
-
     return result
 
-
 def mergeability_signals(pr, checks):
-    """Convert deterministic CI evidence into process signals.
-
-    These signals are deliberately conservative:
-    CI failures are blockers, pending checks require maintainer attention,
-    and unavailable/erroring check evidence is reported as incomplete
-    evidence rather than being treated as success.
-    """
-    signals = []
-
+    """Convert CI evidence to conservative mergeability signals."""
     if not isinstance(checks, dict):
-        return [
-            (
-                "WARN",
-                "CI/check evidence is unavailable; mergeability could not "
-                "be determined.",
-            )
-        ]
-
+        return [("WARN", "CI/check evidence is unavailable; mergeability could not be determined.")]
     if not checks.get("available"):
-        reason = checks.get("reason") or "CI/check evidence is unavailable."
-        return [
-            (
-                "WARN",
-                f"Mergeability could not be determined: {reason}",
-            )
-        ]
+        return [("WARN", f"Mergeability could not be determined: {checks.get('reason') or 'CI/check evidence is unavailable.'}")]
 
-    if checks.get("ci_fresh") is False:
-        stale = ", ".join(checks.get("stale_check_shas") or [])
-        signals.append((
-            "WARN",
-            "STALE CI: some returned check runs belong to a different "
-            f"commit ({stale}) than the PR's current head "
-            f"({checks.get('pr_head_sha')}); do not treat this CI result "
-            "as current without re-verifying.",
-        ))
-
-    if checks.get("checks_error"):
-        signals.append(
-            (
-                "WARN",
-                "CI check-run evidence could not be collected: "
-                f"{checks['checks_error']}",
-            )
-        )
-
-    if checks.get("status_error"):
-        signals.append(
-            (
-                "WARN",
-                "Legacy commit-status evidence could not be collected: "
-                f"{checks['status_error']}",
-            )
-        )
-
+    signals = []
     summary = checks.get("summary") or {}
+    freshness = checks.get("ci_freshness")
+    if freshness is None and checks.get("ci_fresh") is False:
+        freshness = "stale"
+    if freshness == "stale":
+        signals.append(("WARN", "STALE CI: some check runs belong to a different commit than the current PR head; re-verify before trusting CI."))
+    elif freshness == "unknown":
+        signals.append(("WARN", "CI freshness is unverified: no returned check run set or at least one run lacks a verifiable head SHA."))
+    if checks.get("checks_error"):
+        signals.append(("WARN", f"CI check-run evidence could not be collected: {checks['checks_error']}"))
+    if checks.get("status_error"):
+        signals.append(("WARN", f"Legacy commit-status evidence could not be collected: {checks['status_error']}"))
 
+    required_missing = int(summary.get("required_missing", 0) or 0)
+    required_stale = int(summary.get("required_stale", 0) or 0)
+    required_failures = int(summary.get("required_failures", 0) or 0)
+    required_cancelled = int(summary.get("required_cancelled", 0) or 0)
+    required_pending = int(summary.get("required_pending", 0) or 0)
+    required_unknown = int(summary.get("required_unknown", 0) or 0)
     failures = int(summary.get("failures", 0) or 0)
-    completed = int(summary.get("completed", 0) or 0)
-    check_runs = int(summary.get("check_runs", 0) or 0)
+    pending = int(summary.get("pending", 0) or 0)
+    unknown = int(summary.get("unknown_requiredness", 0) or 0)
 
-    if failures:
-        signals.append(
-            (
-                "BLOCK",
-                f"{failures} completed CI check(s) reported failure; "
-                "the PR is not ready to merge until the failures are "
-                "resolved or explicitly explained.",
-            )
-        )
+    if required_missing:
+        signals.append(("BLOCK", f"{required_missing} required CI check(s) have no current-head result; required checks must run and pass before merge."))
+    if required_stale:
+        signals.append(("BLOCK", f"{required_stale} required CI check(s) have only stale results; a current-head result is required."))
+    if required_failures:
+        signals.append(("BLOCK", f"{required_failures} required CI check(s) failed or timed out; resolve or explicitly explain them before merge."))
+    if required_cancelled:
+        signals.append(("BLOCK", f"{required_cancelled} required CI check(s) were cancelled; a successful current-head result is required."))
+    if required_pending:
+        signals.append(("WARN", f"{required_pending} required CI check(s) are incomplete; mergeability is not settled."))
+    if required_unknown:
+        signals.append(("WARN", f"{required_unknown} required CI check(s) could not be classified from the available evidence."))
+    if failures > required_failures:
+        signals.append(("INFO", f"{failures - required_failures} CI failure(s) are not established as required; they are not treated as merge blockers."))
+    if unknown and failures:
+        signals.append(("WARN", f"{unknown} check(s) have unknown requiredness; failures are not promoted to BLOCK without authoritative branch-policy evidence."))
+    if pending and not required_pending:
+        signals.append(("WARN", f"{pending} CI check(s) are incomplete; verify requiredness before treating mergeability as settled."))
 
-    if check_runs and completed < check_runs:
-        pending = check_runs - completed
-        signals.append(
-            (
-                "WARN",
-                f"{pending} CI check(s) are not completed; mergeability "
-                "cannot yet be considered settled.",
-            )
-        )
-
-    legacy_status = summary.get("legacy_status")
-
-    if isinstance(legacy_status, str):
-        normalized_status = legacy_status.strip().lower()
-
-        if normalized_status in {"failure", "error"}:
-            signals.append(
-                (
-                    "BLOCK",
-                    f"Legacy commit status is {normalized_status}; "
-                    "the PR is not ready to merge.",
-                )
-            )
-        elif normalized_status in {"pending"}:
-            signals.append(
-                (
-                    "WARN",
-                    "Legacy commit status is pending; mergeability is "
-                    "not yet settled.",
-                )
-            )
+    legacy = summary.get("legacy_status")
+    if isinstance(legacy, str) and legacy.lower() in {"failure", "error"}:
+        signals.append(("WARN", f"Legacy commit status is {legacy.lower()}; verify current-head association and requiredness before treating it as a merge blocker."))
+    elif isinstance(legacy, str) and legacy.lower() == "pending":
+        signals.append(("WARN", "Legacy commit status is pending; mergeability is not settled."))
 
     if not signals:
-        if check_runs == 0 and not legacy_status:
-            signals.append(
-                (
-                    "WARN",
-                    "No CI check runs or legacy commit status were available; "
-                    "mergeability could not be established from the supplied "
-                    "evidence.",
-                )
-            )
+        if not summary.get("check_runs") and not legacy:
+            signals.append(("WARN", "No CI check runs or legacy commit status were available; mergeability could not be established from the supplied evidence."))
         else:
-            signals.append(
-                (
-                    "OK",
-                    "Available CI/check evidence contains no reported "
-                    "failure or pending check.",
-                )
-            )
-
+            signals.append(("OK", "Available CI/check evidence contains no established required failure."))
     return signals
 
 
@@ -838,43 +1158,16 @@ def make_report(gh, evidence, linked_issues, experts, patterns, reviewer_activit
         timeline,
         labels,
         patterns,
+        reviews=evidence.get("reviews"),
+        review_threads=evidence.get("review_threads"),
     )
 
-    evidence_errors = evidence.get("evidence_errors") or {}
-
-    required_evidence = (
-        "pr",
-        "files",
-        "timeline",
-        "reviews",
-        "review_comments",
-        "issue_comments",
+    review_state = policy_build_review_state(
+        evidence["pr"],
+        reviews=evidence.get("reviews"),
+        timeline=timeline,
+        review_threads=evidence.get("review_threads"),
     )
-
-    missing_evidence = [
-        source
-        for source in required_evidence
-        if source != "pr"
-        and (
-            source in evidence_errors
-            or evidence.get(source) is None
-        )
-    ]
-
-    evidence_completeness = {
-        "attempted": list(required_evidence),
-        "available": [
-            source
-            for source in required_evidence
-            if source not in missing_evidence
-        ],
-        "missing": missing_evidence,
-        "errors": {
-            source: str(evidence_errors[source])
-            for source in evidence_errors
-            if source in required_evidence
-        },
-    }
 
     # Build CI evidence before disposition so readiness decisions are based
     # on the same collected evidence that is exposed in the final report.
@@ -908,9 +1201,9 @@ def make_report(gh, evidence, linked_issues, experts, patterns, reviewer_activit
         evidence_completeness,
     )
 
-    return build_report(
+    report = build_report(
         repository=REPO,
-        generated_at=dt.datetime.now(dt.timezone.utc).isoformat(),
+        generated_at=dt.datetime.now(dt.UTC).isoformat(),
         evidence=evidence,
         linked_issues=linked_issues,
         experts=experts,
@@ -926,6 +1219,8 @@ def make_report(gh, evidence, linked_issues, experts, patterns, reviewer_activit
         gh=gh,
         reviewer_activity_cache=reviewer_activity_cache,
     )
+    report["review_state"] = review_state
+    return report
 
 
 # ---------------------------------------------------------------------------
@@ -1162,6 +1457,7 @@ def main():
     # Build reviewer activity cache — fetches from GitHub, falls back gracefully
     reviewer_activity_cache = ReviewerActivityCache(gh)
 
+    evidence["linked_issue_collection"] = {"status": "NOT_COLLECTED" if args.no_linked_issues else "COLLECTED", "reason": "--no-linked-issues" if args.no_linked_issues else None}
     report = make_report(gh, evidence, linked, experts, patterns, reviewer_activity_cache)
 
     report["references"] = {"peps": peps, "discussions": discussions}
@@ -1169,6 +1465,11 @@ def main():
         "codeowners_path": codeowners_path,
         "codeowners_rules": len(rules),
         "base_sha": base_sha,
+        "codeowners_provenance": {
+            "revision": base_sha,
+            "path": codeowners_path,
+            "status": "available" if codeowners_path and codeowners_text is not None else "unavailable",
+        },
     }
 
     if args.ai:
@@ -1176,8 +1477,11 @@ def main():
         # Configuration is explicit CLI input when supplied; otherwise ai.py
         # resolves the corresponding environment/provider defaults.
         try:
+            ai_input = copy.deepcopy(report)
+            ai_input.pop("ai_synthesis", None)
+            ai_input.pop("ai_error", None)
             report["ai_synthesis"] = ai_synthesize(
-                report,
+                ai_input,
                 provider=args.ai_provider,
                 model=args.ai_model,
                 timeout=args.ai_timeout,

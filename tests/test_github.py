@@ -1242,6 +1242,188 @@ class GitHubTests(unittest.TestCase):
             [True, True, False],
         )
 
+    def test_head_commit_evidence_collects_author_and_committer_identity(self):
+        requests = []
+
+        payload = {
+            "sha": "head-sha",
+            "html_url": "https://github.com/python/cpython/commit/head-sha",
+            "author": {
+                "login": "github-author",
+            },
+            "committer": {
+                "login": "github-committer",
+            },
+            "commit": {
+                "author": {
+                    "name": "Author Name",
+                    "email": "author@example.com",
+                    "date": "2026-09-14T10:00:00Z",
+                },
+                "committer": {
+                    "name": "Committer Name",
+                    "email": "committer@example.com",
+                    "date": "2026-09-14T11:00:00Z",
+                },
+            },
+        }
+
+        def opener(request, timeout):
+            requests.append(request.full_url)
+            return FakeResponse(payload)
+
+        with tempfile.TemporaryDirectory() as temp:
+            client = GitHub(
+                repo="python/cpython",
+                cache_dir=Path(temp),
+                cache_ttl=0,
+                opener=opener,
+            )
+
+            result = client.head_commit_evidence("head-sha")
+
+        self.assertEqual(
+            result,
+            {
+                "status": "complete",
+                "sha": "head-sha",
+                "author": {
+                    "login": "github-author",
+                    "name": "Author Name",
+                    "email": "author@example.com",
+                    "date": "2026-09-14T10:00:00Z",
+                },
+                "committer": {
+                    "login": "github-committer",
+                    "name": "Committer Name",
+                    "email": "committer@example.com",
+                    "date": "2026-09-14T11:00:00Z",
+                },
+                "html_url": (
+                    "https://github.com/python/cpython/commit/head-sha"
+                ),
+            },
+        )
+
+        self.assertEqual(
+            requests,
+            [
+                "https://api.github.com/repos/python/cpython"
+                "/commits/head-sha"
+            ],
+        )
+
+    def test_head_commit_evidence_url_encodes_sha(self):
+        requests = []
+
+        def opener(request, timeout):
+            requests.append(request.full_url)
+            return FakeResponse(
+                {
+                    "sha": "abc/def",
+                    "author": {},
+                    "committer": {},
+                    "commit": {},
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as temp:
+            client = GitHub(
+                repo="python/cpython",
+                cache_dir=Path(temp),
+                cache_ttl=0,
+                opener=opener,
+            )
+
+            result = client.head_commit_evidence("abc/def")
+
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["sha"], "abc/def")
+        self.assertEqual(
+            requests,
+            [
+                "https://api.github.com/repos/python/cpython"
+                "/commits/abc%2Fdef"
+            ],
+        )
+
+    def test_head_commit_evidence_without_sha_is_explicitly_unavailable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            client = GitHub(
+                repo="python/cpython",
+                cache_dir=Path(temp),
+                cache_ttl=0,
+            )
+
+            for sha in (None, "", "   "):
+                with self.subTest(sha=sha):
+                    result = client.head_commit_evidence(sha)
+
+                    self.assertEqual(
+                        result["status"],
+                        "unavailable",
+                    )
+                    self.assertEqual(
+                        result["sha"],
+                        sha,
+                    )
+                    self.assertIsNone(result["author"])
+                    self.assertIsNone(result["committer"])
+                    self.assertIn(
+                        "head SHA is unavailable",
+                        result["error"],
+                    )
+
+    def test_head_commit_evidence_records_github_failure(self):
+        def opener(request, timeout):
+            raise urllib.error.HTTPError(
+                request.full_url,
+                404,
+                "commit not found",
+                {},
+                None,
+            )
+
+        with tempfile.TemporaryDirectory() as temp:
+            client = GitHub(
+                repo="python/cpython",
+                cache_dir=Path(temp),
+                cache_ttl=0,
+                retries=1,
+                opener=opener,
+            )
+
+            result = client.head_commit_evidence("missing-sha")
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["sha"], "missing-sha")
+        self.assertIsNone(result["author"])
+        self.assertIsNone(result["committer"])
+        self.assertIn("GitHub HTTP 404", result["error"])
+
+    def test_head_commit_evidence_rejects_invalid_commit_response(self):
+        def opener(request, timeout):
+            return FakeResponse([])
+
+        with tempfile.TemporaryDirectory() as temp:
+            client = GitHub(
+                repo="python/cpython",
+                cache_dir=Path(temp),
+                cache_ttl=0,
+                opener=opener,
+            )
+
+            result = client.head_commit_evidence("head-sha")
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["sha"], "head-sha")
+        self.assertIsNone(result["author"])
+        self.assertIsNone(result["committer"])
+        self.assertIn(
+            "invalid commit response",
+            result["error"],
+        )
+
     def test_linked_issue_evidence_batch_isolates_failures(self):
         def opener(request, timeout):
             url = request.full_url
@@ -1735,6 +1917,86 @@ class SourceEvidenceIntegrationGitHubTests(unittest.TestCase):
             },
         )
 
+    def test_pull_request_evidence_includes_head_commit_evidence(self):
+        gh = self.FakeGitHub()
+
+        gh.head_commit_evidence = lambda sha: {
+            "status": "complete",
+            "sha": sha,
+            "author": {
+                "login": "author-login",
+                "name": "Author Name",
+                "email": "author@example.com",
+                "date": "2026-09-14T10:00:00Z",
+            },
+            "committer": {
+                "login": "committer-login",
+                "name": "Committer Name",
+                "email": "committer@example.com",
+                "date": "2026-09-14T11:00:00Z",
+            },
+            "html_url": (
+                "https://github.com/python/cpython/commit/head-sha"
+            ),
+        }
+
+        result = gh.pull_request_evidence(123)
+
+        self.assertEqual(
+            result["evidence"]["head_commit"],
+            {
+                "status": "complete",
+                "sha": "head-sha",
+                "author": {
+                    "login": "author-login",
+                    "name": "Author Name",
+                    "email": "author@example.com",
+                    "date": "2026-09-14T10:00:00Z",
+                },
+                "committer": {
+                    "login": "committer-login",
+                    "name": "Committer Name",
+                    "email": "committer@example.com",
+                    "date": "2026-09-14T11:00:00Z",
+                },
+                "html_url": (
+                    "https://github.com/python/cpython/commit/head-sha"
+                ),
+            },
+        )
+
+        head_commit_record = (
+            result["stats"]
+            .get("evidence", {})
+            .get("head_commit")
+        )
+
+        self.assertIsNotNone(head_commit_record)
+        self.assertEqual(
+            head_commit_record["status"],
+            "complete",
+        )
+        self.assertEqual(
+            head_commit_record["collected"],
+            1,
+        )
+        self.assertEqual(
+            head_commit_record["total"],
+            1,
+        )
+        self.assertEqual(
+            head_commit_record["details"]["head_sha"],
+            "head-sha",
+        )
+        self.assertEqual(
+            head_commit_record["details"]["author_login"],
+            "author-login",
+        )
+        self.assertEqual(
+            head_commit_record["details"]["committer_login"],
+            "committer-login",
+        )
+
 
 class HistoryIntegrationGitHubTests(unittest.TestCase):
     class FakeGitHub(GitHub):
@@ -1960,7 +2222,563 @@ class HistoryIntegrationGitHubTests(unittest.TestCase):
             result["errors"],
         )
 
+class RequiredChecksGitHubTests(unittest.TestCase):
+    def make_client(self, opener):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        return GitHub(
+            cache_dir=Path(temp.name),
+            cache_ttl=0,
+            retries=1,
+            opener=opener,
+        )
+
+    @staticmethod
+    def protection_payload(*, contexts=None, checks=None):
+        return {
+            "required_status_checks": {
+                "contexts": contexts or [],
+                "checks": checks or [],
+            }
+        }
+
+    def test_branch_protection_fetches_and_url_encodes_branch(self):
+        requests = []
+
+        def opener(request, timeout):
+            requests.append(request.full_url)
+            return FakeResponse({"required_status_checks": None})
+
+        gh = self.make_client(opener)
+
+        result = gh.branch_protection("release/3.16")
+
+        self.assertEqual(result["required_status_checks"], None)
+        self.assertIn(
+            "/branches/release%2F3.16/protection",
+            requests[0],
+        )
+
+    def test_branch_protection_rejects_invalid_branch(self):
+        gh = self.make_client(lambda request, timeout: FakeResponse({}))
+
+        for branch in ("", "   ", None, 123):
+            with self.subTest(branch=branch):
+                with self.assertRaises(ValueError):
+                    gh.branch_protection(branch)
+
+    def test_branch_protection_rejects_non_mapping_response(self):
+        gh = self.make_client(lambda request, timeout: FakeResponse([]))
+
+        with self.assertRaises(GitHubError):
+            gh.branch_protection("main")
+
+    def test_branch_rules_fetches_and_validates_response(self):
+        requests = []
+
+        def opener(request, timeout):
+            requests.append(request.full_url)
+            return FakeResponse([{"type": "required_status_checks"}])
+
+        gh = self.make_client(opener)
+
+        result = gh.branch_rules("main")
+
+        self.assertEqual(result, [{"type": "required_status_checks"}])
+        self.assertIn("/rules/branches/main", requests[0])
+
+    def test_branch_rules_rejects_invalid_branch(self):
+        gh = self.make_client(lambda request, timeout: FakeResponse([]))
+
+        for branch in ("", "   ", None, 123):
+            with self.subTest(branch=branch):
+                with self.assertRaises(ValueError):
+                    gh.branch_rules(branch)
+
+    def test_branch_rules_rejects_non_list_response(self):
+        gh = self.make_client(lambda request, timeout: FakeResponse({}))
+
+        with self.assertRaises(GitHubError):
+            gh.branch_rules("main")
+
+    def test_required_checks_reads_classic_contexts_and_modern_checks(self):
+        protection = self.protection_payload(
+            contexts=["build", "lint"],
+            checks=[
+                {"context": "test", "app_id": 123},
+                {"context": "lint", "app_id": 456},
+            ],
+        )
+
+        def opener(request, timeout):
+            if request.full_url.endswith("/branches/main/protection"):
+                return FakeResponse(protection)
+            if request.full_url.endswith("/rules/branches/main"):
+                return FakeResponse([])
+            raise AssertionError(request.full_url)
+
+        gh = self.make_client(opener)
+
+        result = gh.required_checks("main")
+
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(
+            result["required_check_names"],
+            ["build", "lint", "test"],
+        )
+        self.assertEqual(
+            [
+                (item["name"], item["integration_id"])
+                for item in result["required_checks"]
+            ],
+            [
+                ("build", None),
+                ("lint", None),
+                ("lint", 456),
+                ("test", 123),
+            ],
+        )
+        self.assertEqual(
+            result["sources"]["branch_protection"]["required_check_count"],
+            4,
+        )
+        self.assertEqual(
+            result["sources"]["branch_rules"]["status"],
+            "available",
+        )
+
+    def test_required_checks_reads_effective_ruleset_checks(self):
+        rules = [
+            {
+                "type": "required_status_checks",
+                "ruleset_id": 99,
+                "ruleset_source": "python/cpython",
+                "ruleset_source_type": "Repository",
+                "parameters": {
+                    "required_status_checks": [
+                        {"context": "build", "integration_id": 111},
+                        {"context": "tests", "integration_id": 222},
+                    ]
+                },
+            },
+            {
+                "type": "pull_request",
+                "parameters": {},
+            },
+        ]
+
+        def opener(request, timeout):
+            if request.full_url.endswith("/branches/main/protection"):
+                return FakeResponse(
+                    {
+                        "required_status_checks": None,
+                    }
+                )
+            if request.full_url.endswith("/rules/branches/main"):
+                return FakeResponse(rules)
+            raise AssertionError(request.full_url)
+
+        gh = self.make_client(opener)
+
+        result = gh.required_checks("main")
+
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["required_check_names"], ["build", "tests"])
+        self.assertEqual(
+            result["required_checks"],
+            [
+                {
+                    "name": "build",
+                    "source": "python/cpython",
+                    "source_type": "Repository",
+                    "ruleset_id": 99,
+                    "integration_id": 111,
+                },
+                {
+                    "name": "tests",
+                    "source": "python/cpython",
+                    "source_type": "Repository",
+                    "ruleset_id": 99,
+                    "integration_id": 222,
+                },
+            ],
+        )
+        self.assertEqual(
+            result["sources"]["branch_protection"]["status"],
+            "available",
+        )
+
+    def test_required_checks_deduplicates_identical_source_records(self):
+        protection = self.protection_payload(
+            checks=[{"context": "build", "app_id": 123}]
+        )
+        rules = [
+            {
+                "type": "required_status_checks",
+                "ruleset_id": 10,
+                "ruleset_source": "python/cpython",
+                "ruleset_source_type": "Repository",
+                "parameters": {
+                    "required_status_checks": [
+                        {"context": "build", "integration_id": 123},
+                    ]
+                },
+            }
+        ]
+
+        def opener(request, timeout):
+            if request.full_url.endswith("/branches/main/protection"):
+                return FakeResponse(protection)
+            if request.full_url.endswith("/rules/branches/main"):
+                return FakeResponse(rules)
+            raise AssertionError(request.full_url)
+
+        gh = self.make_client(opener)
+        result = gh.required_checks("main")
+
+        # These have different provenance/source_type/ruleset metadata and
+        # therefore must not be collapsed into one unsupported "winner".
+        self.assertEqual(
+            len([item for item in result["required_checks"] if item["name"] == "build"]),
+            2,
+        )
+
+    def test_required_checks_ignores_malformed_required_check_entries(self):
+        protection = {
+            "required_status_checks": {
+                "contexts": ["valid", "", 123, "   "],
+                "checks": [
+                    {"context": "modern", "app_id": 1},
+                    {"context": "", "app_id": 2},
+                    {"context": 123, "app_id": 3},
+                    "not-a-mapping",
+                ],
+            }
+        }
+
+        rules = [
+            {
+                "type": "required_status_checks",
+                "parameters": {
+                    "required_status_checks": [
+                        {"context": "ruleset-valid", "integration_id": 7},
+                        {"context": ""},
+                        {"integration_id": 8},
+                    ]
+                },
+            }
+        ]
+
+        def opener(request, timeout):
+            if request.full_url.endswith("/branches/main/protection"):
+                return FakeResponse(protection)
+            if request.full_url.endswith("/rules/branches/main"):
+                return FakeResponse(rules)
+            raise AssertionError(request.full_url)
+
+        gh = self.make_client(opener)
+        result = gh.required_checks("main")
+
+        self.assertEqual(
+            result["required_check_names"],
+            ["modern", "ruleset-valid", "valid"],
+        )
+
+    def test_required_checks_is_complete_when_classic_protection_has_no_required_checks(self):
+        protection = {
+            "required_status_checks": None,
+        }
+
+        def opener(request, timeout):
+            if request.full_url.endswith("/branches/main/protection"):
+                return FakeResponse(protection)
+            if request.full_url.endswith("/rules/branches/main"):
+                return FakeResponse([])
+            raise AssertionError(request.full_url)
+
+        gh = self.make_client(opener)
+        result = gh.required_checks("main")
+
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["required_checks"], [])
+        self.assertEqual(
+            result["sources"]["branch_protection"]["status"],
+            "available",
+        )
+        self.assertEqual(
+            result["sources"]["branch_rules"]["status"],
+            "available",
+        )
+        self.assertEqual(result["errors"], {})
+
+    def test_required_checks_does_not_treat_branch_protection_404_as_absent(self):
+        def opener(request, timeout):
+            if request.full_url.endswith("/branches/main/protection"):
+                raise urllib.error.HTTPError(
+                    request.full_url,
+                    404,
+                    "not found",
+                    {},
+                    None,
+                )
+            if request.full_url.endswith("/rules/branches/main"):
+                return FakeResponse([])
+            raise AssertionError(request.full_url)
+
+        gh = self.make_client(opener)
+        result = gh.required_checks("main")
+
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["required_checks"], [])
+        self.assertEqual(
+            result["sources"]["branch_protection"]["status"],
+            "unavailable",
+        )
+        self.assertEqual(
+            result["sources"]["branch_rules"]["status"],
+            "available",
+        )
+        self.assertIn(
+            "branch_protection",
+            result["errors"],
+        )
+
+    def test_required_checks_policy_is_incomplete_when_classic_source_is_unavailable(self):
+        def opener(request, timeout):
+            if request.full_url.endswith("/branches/main/protection"):
+                raise urllib.error.HTTPError(
+                    request.full_url,
+                    404,
+                    "not found",
+                    {},
+                    None,
+                )
+            if request.full_url.endswith("/rules/branches/main"):
+                return FakeResponse(
+                    [
+                        {
+                            "type": "required_status_checks",
+                            "ruleset_id": 42,
+                            "ruleset_source": "python/cpython",
+                            "ruleset_source_type": "Repository",
+                            "parameters": {
+                                "required_status_checks": [
+                                    {
+                                        "context": "build",
+                                        "integration_id": 123,
+                                    },
+                                ],
+                            },
+                        },
+                    ]
+                )
+            raise AssertionError(request.full_url)
+
+        gh = self.make_client(opener)
+        result = gh.required_checks("main")
+
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(
+            result["required_check_names"],
+            ["build"],
+        )
+        self.assertEqual(
+            result["sources"]["branch_protection"]["status"],
+            "unavailable",
+        )
+        self.assertEqual(
+            result["sources"]["branch_rules"]["status"],
+            "available",
+        )
+
+    def test_required_checks_marks_classic_failure_as_failed_without_hiding_rules(self):
+        def opener(request, timeout):
+            if request.full_url.endswith("/branches/main/protection"):
+                raise urllib.error.HTTPError(
+                    request.full_url, 500, "server error", {}, None
+                )
+            if request.full_url.endswith("/rules/branches/main"):
+                return FakeResponse(
+                    [
+                        {
+                            "type": "required_status_checks",
+                            "ruleset_id": 1,
+                            "parameters": {
+                                "required_status_checks": [
+                                    {"context": "tests", "integration_id": None}
+                                ]
+                            },
+                        }
+                    ]
+                )
+            raise AssertionError(request.full_url)
+
+        gh = self.make_client(opener)
+        result = gh.required_checks("main")
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["required_check_names"], ["tests"])
+        self.assertEqual(
+            result["sources"]["branch_protection"]["status"],
+            "failed",
+        )
+        self.assertIn("branch_protection", result["errors"])
+        self.assertEqual(
+            result["sources"]["branch_rules"]["status"],
+            "available",
+        )
+
+    def test_required_checks_marks_rules_failure_as_failed(self):
+        def opener(request, timeout):
+            if request.full_url.endswith("/branches/main/protection"):
+                return FakeResponse(
+                    self.protection_payload(contexts=["build"])
+                )
+            if request.full_url.endswith("/rules/branches/main"):
+                raise urllib.error.HTTPError(
+                    request.full_url, 500, "rules unavailable", {}, None
+                )
+            raise AssertionError(request.full_url)
+
+        gh = self.make_client(opener)
+        result = gh.required_checks("main")
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["required_check_names"], ["build"])
+        self.assertEqual(
+            result["sources"]["branch_rules"]["status"],
+            "failed",
+        )
+        self.assertIn("branch_rules", result["errors"])
+
+    def test_required_checks_treats_rules_404_as_unavailable_not_absent(self):
+        def opener(request, timeout):
+            if request.full_url.endswith("/branches/main/protection"):
+                return FakeResponse(
+                    self.protection_payload(contexts=["build"])
+                )
+            if request.full_url.endswith("/rules/branches/main"):
+                raise urllib.error.HTTPError(
+                    request.full_url, 404, "not found", {}, None
+                )
+            raise AssertionError(request.full_url)
+
+        gh = self.make_client(opener)
+        result = gh.required_checks("main")
+
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["required_check_names"], ["build"])
+        self.assertEqual(
+            result["sources"]["branch_rules"]["status"],
+            "unavailable",
+        )
+
+    def test_required_checks_rejects_invalid_branch(self):
+        gh = self.make_client(lambda request, timeout: FakeResponse({}))
+
+        for branch in ("", "   ", None, 123):
+            with self.subTest(branch=branch):
+                with self.assertRaises(ValueError):
+                    gh.required_checks(branch)
+
+    def test_required_checks_preserves_ruleset_provenance_and_app_ids(self):
+        rules = [
+            {
+                "type": "required_status_checks",
+                "ruleset_id": 321,
+                "ruleset_source": "acme/cpython",
+                "ruleset_source_type": "Organization",
+                "parameters": {
+                    "required_status_checks": [
+                        {"context": "CI / Windows", "integration_id": 456}
+                    ]
+                },
+            }
+        ]
+
+        def opener(request, timeout):
+            if request.full_url.endswith("/branches/main/protection"):
+                return FakeResponse({})
+            if request.full_url.endswith("/rules/branches/main"):
+                return FakeResponse(rules)
+            raise AssertionError(request.full_url)
+
+        gh = self.make_client(opener)
+        result = gh.required_checks("main")
+
+        self.assertEqual(
+            result["required_checks"],
+            [
+                {
+                    "name": "CI / Windows",
+                    "source": "acme/cpython",
+                    "source_type": "Organization",
+                    "ruleset_id": 321,
+                    "integration_id": 456,
+                }
+            ],
+        )
+
+    def test_required_checks_sorts_names_case_insensitively(self):
+        protection = self.protection_payload(
+            contexts=["z-check", "A-check", "m-check"]
+        )
+
+        def opener(request, timeout):
+            if request.full_url.endswith("/branches/main/protection"):
+                return FakeResponse(protection)
+            if request.full_url.endswith("/rules/branches/main"):
+                return FakeResponse([])
+            raise AssertionError(request.full_url)
+
+        gh = self.make_client(opener)
+        result = gh.required_checks("main")
+
+        self.assertEqual(
+            result["required_check_names"],
+            ["A-check", "m-check", "z-check"],
+        )
 
 
 if __name__ == "__main__":
     unittest.main()
+
+class ReviewThreadGitHubTests(unittest.TestCase):
+    def test_review_threads_without_token_are_explicitly_unavailable(self):
+        with tempfile.TemporaryDirectory() as td:
+            gh = GitHub(repo="python/cpython", cache_dir=Path(td), token="")
+            result = gh.review_threads(123)
+        self.assertEqual(result["status"], "unavailable")
+        self.assertIn("GITHUB_TOKEN", result["error"])
+
+    def test_review_threads_collects_resolution_state(self):
+        requests = []
+        payload = {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": [
+                                {"id": "thread-1", "isResolved": False, "comments": {"nodes": [{"createdAt": "2026-09-10T00:00:00Z", "author": {"login": "alice"}}]}},
+                                {"id": "thread-2", "isResolved": True, "comments": {"nodes": [{"createdAt": "2026-09-09T00:00:00Z", "author": {"login": "bob"}}]}},
+                            ],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        }
+                    }
+                }
+            }
+        }
+        def opener(request, timeout):
+            requests.append(request)
+            return FakeResponse(payload)
+        with tempfile.TemporaryDirectory() as td:
+            gh = GitHub(repo="python/cpython", cache_dir=Path(td), token="test-token", opener=opener)
+            result = gh.review_threads(123)
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(len(result["threads"]), 2)
+        self.assertFalse(result["threads"][0]["is_resolved"])
+        self.assertTrue(requests)
+        self.assertEqual(requests[0].method, "POST")
+        body = json.loads(requests[0].data.decode("utf-8"))
+        self.assertEqual(body["variables"]["number"], 123)
+        self.assertIn("reviewThreads", body["query"])

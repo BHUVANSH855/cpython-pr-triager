@@ -49,6 +49,7 @@ class HistoricalContextTests:
 
         assert result == {
             "available": False,
+            "status": "complete",
             "history_files": 0,
             "history_commits": 0,
             "history_errors": 0,
@@ -81,6 +82,7 @@ class HistoricalContextTests:
         )
 
         assert result["available"] is True
+        assert result["status"] == "complete"
         assert result["history_files"] == 1
         assert result["history_commits"] == 2
         assert result["history_errors"] == 0
@@ -120,6 +122,7 @@ class HistoricalContextTests:
         )
 
         assert result["available"] is True
+        assert result["status"] == "complete"
         assert result["history_files"] == 1
         assert result["history_commits"] == 0
 
@@ -193,7 +196,7 @@ class HistoricalContextTests:
         )
 
         assert result["history_files"] == 1
-        assert result["history_commits"] == 4
+        assert result["history_commits"] == 1
         assert result["files"][0]["commit_count"] == 1
         assert result["files"][0]["authors"] == ["alice"]
 
@@ -350,6 +353,7 @@ class HistoricalContextTests:
         )
 
         assert result["available"] is True
+        assert result["status"] == "partial"
         assert result["history_files"] == 0
         assert result["history_commits"] == 0
         assert result["history_errors"] == 1
@@ -539,6 +543,83 @@ class EvidenceCountsTests:
         assert result["rate_limit_reset"] == 123456
 
 
+def test_evidence_errors_do_not_override_available_sources():
+    from scripts.triager.report import _build_evidence_completeness
+
+    result = _build_evidence_completeness({
+        "pr": {},
+        "files": [],
+        "timeline": [],
+        "reviews": [],
+        "review_comments": [],
+        "issue_comments": [],
+        "evidence_errors": {"reviews": "transient failure after partial collection"},
+    })
+
+    assert "reviews" in result.available
+    assert "reviews" not in result.missing
+    assert "reviews" in result.errors
+
+
+def test_explicit_evidence_statuses_override_presence_ambiguity():
+    from scripts.triager.report import _build_evidence_completeness
+
+    result = _build_evidence_completeness({
+        "pr": {},
+        "files": [],
+        "timeline": [],
+        "reviews": [],
+        "review_comments": [],
+        "issue_comments": [],
+        "evidence_statuses": {
+            "reviews": "failed",
+            "timeline": "partial",
+        },
+    })
+
+    assert "reviews" in result.missing
+    assert "reviews" not in result.available
+    assert "timeline" in result.available
+    assert "timeline" not in result.missing
+
+
+def test_file_patch_availability_survives_report_assembly():
+    inputs = _build_report_inputs(evidence={
+        "files": [{
+            "filename": "Objects/object.c",
+            "status": "modified",
+            "additions": 1,
+            "deletions": 0,
+            "patch_available": True,
+        }],
+    })
+    report = build_report(**inputs)
+
+    assert report["files"][0]["patch_available"] is True
+
+
+def test_raw_checks_are_json_safe():
+    checks = {
+        "summary": {},
+        "check_runs": [],
+        "unexpected": object(),
+    }
+    report = build_report(**_build_report_inputs(checks=checks))
+
+    assert report["checks"]["unexpected"]["type"] == "object"
+    assert isinstance(report["checks"]["unexpected"]["repr"], str)
+
+
+def test_history_status_surfaces_sampling():
+    result = _build_historical_context({
+        "files": [_file("Objects/object.c", [_history_entry()])],
+        "evidence_statuses": {"history:Objects/object.c": "sampled"},
+    })
+
+    assert result["available"] is True
+    assert result["status"] == "sampled"
+
+
 def _build_report_inputs(
     *,
     checks: dict | None = None,
@@ -709,7 +790,8 @@ class ReportAssemblyTests:
         assert report["check_summaries"]["successes"] == 2
         assert report["check_summaries"]["failures"] == 1
         assert report["checks"]["check_runs"] == checks["check_runs"]
-        assert report["checks"]["unexpected"] is checks["unexpected"]
+        assert report["checks"]["unexpected"]["type"] == "object"
+        assert isinstance(report["checks"]["unexpected"]["repr"], str)
 
     def test_malformed_raw_check_summary_does_not_corrupt_canonical_summary(self):
         checks = {

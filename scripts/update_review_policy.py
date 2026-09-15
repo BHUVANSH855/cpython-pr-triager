@@ -11,7 +11,6 @@ from html import unescape
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-
 DEFAULT_OUTPUT = (
     Path(__file__).resolve().parents[1]
     / "data"
@@ -57,13 +56,13 @@ def normalise_html(text: str) -> str:
         r"<script\b[^>]*>.*?</script>",
         " ",
         text,
-        flags=re.I | re.S,
+        flags=re.IGNORECASE | re.DOTALL,
     )
     text = re.sub(
         r"<style\b[^>]*>.*?</style>",
         " ",
         text,
-        flags=re.I | re.S,
+        flags=re.IGNORECASE | re.DOTALL,
     )
     text = re.sub(r"<[^>]+>", " ", text)
     text = re.sub(r"\s+", " ", text)
@@ -119,7 +118,7 @@ def build_snapshot(
         ],
         "retrieved_at": (
             retrieved_at
-            or dt.datetime.now(dt.timezone.utc)
+            or dt.datetime.now(dt.UTC)
             .replace(microsecond=0)
             .isoformat()
             .replace("+00:00", "Z")

@@ -70,11 +70,34 @@ def _build_evidence_completeness(evidence: Mapping[str, Any]) -> EvidenceComplet
             available.append(source)
         else:
             missing.append(source)
+    # An error is diagnostic evidence, not proof that a source was absent.
+    # Preserve explicit availability so collection failures cannot silently
+    # rewrite a successfully returned source into ``missing``.
     for source in errors:
-        if source in available:
-            available.remove(source)
-        if source not in missing:
-            missing.append(source)
+        if source not in attempted:
+            attempted.append(source)
+
+    # Snapshot-aware callers may provide authoritative per-source status.
+    # ``partial``/``sampled`` are usable evidence; ``failed``/``unavailable``
+    # are not.  When statuses are absent, retain the legacy presence-based
+    # behavior above for compatibility.
+    raw_statuses = evidence.get("evidence_statuses")
+    if isinstance(raw_statuses, Mapping):
+        for source, raw_status in raw_statuses.items():
+            source = str(source)
+            status = str(raw_status).strip().lower()
+            if not source or source not in attempted:
+                continue
+            if status in {"complete", "partial", "sampled"}:
+                if source not in available:
+                    available.append(source)
+                if source in missing:
+                    missing.remove(source)
+            elif status in {"failed", "unavailable"}:
+                if source in available:
+                    available.remove(source)
+                if source not in missing:
+                    missing.append(source)
 
     needs_base, required_base = _base_content_requirements(evidence)
     if needs_base:
@@ -181,6 +204,10 @@ def _build_file_reports(files, classify):
             "status": file_data.get("status"),
             "additions": file_data.get("additions"),
             "deletions": file_data.get("deletions"),
+            "patch_available": bool(
+                file_data.get("patch_available")
+                or file_data.get("patch")
+            ),
             "subsystem": subsystem,
             "component": component,
             "expected_test_hint": expected_test_hint,
@@ -195,6 +222,7 @@ def _build_file_models(file_reports):
             status=str(item.get("status") or "modified"),
             additions=_safe_int(item.get("additions")),
             deletions=_safe_int(item.get("deletions")),
+            patch_available=bool(item.get("patch_available")),
             subsystem=str(item.get("subsystem") or "unknown"),
             component=str(item.get("component") or "unknown"),
             expected_test_hint=item.get("expected_test_hint"),
@@ -213,7 +241,9 @@ def _build_evidence_counts(evidence, linked_issues, gh):
         history = file_data.get("history")
         if isinstance(history, list):
             history_files += 1
-            history_commits += len(history)
+            history_commits += sum(
+                1 for entry in history if isinstance(entry, Mapping)
+            )
     evidence_errors = evidence.get("evidence_errors", {})
     if isinstance(evidence_errors, Mapping):
         history_errors = sum(
@@ -259,7 +289,9 @@ def _build_historical_context(evidence):
         if not isinstance(history, list):
             continue
         history_files += 1
-        history_commits += len(history)
+        history_commits += sum(
+            1 for entry in history if isinstance(entry, Mapping)
+        )
         commits = [_history_entry_summary(e) for e in history if isinstance(e, Mapping)]
         authors = sorted({str(c["author"]) for c in commits if c.get("author")})
         files.append({
@@ -274,8 +306,26 @@ def _build_historical_context(evidence):
             1 for k, v in evidence_errors.items()
             if str(k).startswith("history:") and v is not None
         )
+    history_status = "complete"
+    raw_statuses = evidence.get("evidence_statuses")
+    if isinstance(raw_statuses, Mapping):
+        history_statuses = [
+            str(value).strip().lower()
+            for key, value in raw_statuses.items()
+            if str(key).startswith("history:")
+        ]
+        if any(value == "sampled" for value in history_statuses):
+            history_status = "sampled"
+        elif any(value == "partial" for value in history_statuses):
+            history_status = "partial"
+        elif any(value in {"failed", "unavailable"} for value in history_statuses):
+            history_status = "partial"
+    if history_errors and history_status == "complete":
+        history_status = "partial"
+
     context: dict[str, Any] = {
         "available": bool(history_files or history_errors),
+        "status": history_status,
         "history_files": history_files,
         "history_commits": history_commits,
         "history_errors": history_errors,
@@ -512,6 +562,24 @@ def _normalise_check_models(checks: Mapping[str, Any]) -> CheckSummary:
     )
 
 
+
+
+def _json_safe(value: Any) -> Any:
+    """Return a deterministic JSON-compatible representation of untrusted data."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Mapping):
+        return {
+            str(key): _json_safe(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, set):
+        return sorted((_json_safe(item) for item in value), key=lambda item: repr(item))
+    return {"type": type(value).__name__, "repr": repr(value)}
+
+
 def build_report(
     *,
     repository: str,
@@ -589,7 +657,7 @@ def build_report(
 
     report["labels"] = summarize_labels(labels, label_metadata(gh))
     report["timeline"] = timeline
-    report["checks"] = dict(checks)
+    report["checks"] = _json_safe(dict(checks))
     report["check_summaries"] = canonical_check_summaries
     report["evidence_counts"] = _build_evidence_counts(evidence, linked_issues, gh)
 
@@ -600,6 +668,6 @@ def build_report(
             for key, value in extra_metadata.items():
                 key = str(key)
                 if key not in metadata:
-                    metadata[key] = value
+                    metadata[key] = _json_safe(value)
 
     return report

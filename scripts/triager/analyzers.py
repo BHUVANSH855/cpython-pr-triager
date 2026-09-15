@@ -79,31 +79,31 @@ RULES: dict[str, tuple[str, str, str, str, str]] = {
     ),
     "c-raw-malloc": (
         r"(?<!\w)malloc\s*\(",
-        "HIGH",
-        "medium",
+        "LOW",
+        "low",
         "memory",
-        "raw malloc() introduced; use PyMem_Malloc() to go through the CPython allocator.",
+        "raw malloc() was added; verify that the allocation domain is intentional and matched by the correct deallocator.",
     ),
     "c-raw-free": (
         r"(?<!\w)free\s*\(",
-        "HIGH",
-        "medium",
+        "LOW",
+        "low",
         "memory",
-        "raw free() introduced; use PyMem_Free() to match the CPython allocator.",
+        "raw free() was added; verify that the pointer belongs to the matching allocation domain.",
     ),
     "c-raw-realloc": (
         r"(?<!\w)realloc\s*\(",
-        "HIGH",
-        "medium",
+        "LOW",
+        "low",
         "memory",
-        "raw realloc() introduced; use PyMem_Realloc().",
+        "raw realloc() was added; verify that the allocation domain and failure/ownership paths are correct.",
     ),
     "c-raw-calloc": (
         r"(?<!\w)calloc\s*\(",
-        "HIGH",
-        "medium",
+        "LOW",
+        "low",
         "memory",
-        "raw calloc() introduced; use PyMem_Calloc().",
+        "raw calloc() was added; verify that the allocation domain and matching deallocation are intentional.",
     ),
     "cpython-private-api": (
         r"\b_Py_[A-Za-z]\w*",
@@ -121,10 +121,10 @@ RULES: dict[str, tuple[str, str, str, str, str]] = {
     ),
     "cpython-pycobject": (
         r"\bPyCObject_",
-        "CRITICAL",
-        "high",
+        "MEDIUM",
+        "low",
         "api",
-        "PyCObject was removed in Python 3.x; use PyCapsule instead.",
+        "PyCObject-related API usage was added; verify the target API and supported compatibility requirements.",
     ),
     "error-clear": (
         r"\bPyErr_Clear\s*\(",
@@ -233,6 +233,26 @@ def _is_test_file(filename: str) -> bool:
     )
 
 
+def _strip_obvious_non_code(text: str, *, c_family: bool) -> str:
+    """Remove obvious comment/string-only content before heuristic matching.
+
+    This is intentionally conservative rather than a full C/Python lexer.
+    The deterministic rules are review prompts, so avoiding an obvious match
+    in a comment or quoted literal is preferable to manufacturing a finding.
+    """
+    stripped = text.lstrip()
+    if c_family:
+        if stripped.startswith(("//", "/*", "*/")):
+            return ""
+        # Common one-line C/C++ string-only logging/documentation fragments.
+        if stripped.startswith(("///", '""', "''")):
+            return ""
+    else:
+        if stripped.startswith("#"):
+            return ""
+    return text
+
+
 def _finding_sort_key(finding: Finding) -> tuple[int, int, str, str]:
     severity_order = {
         "CRITICAL": 0,
@@ -295,6 +315,9 @@ def _add_rule_findings(
         if stripped.startswith(("//", "/*", "*/")):
             return True
 
+        # A line beginning with "*" can be valid C (for example,
+        # "*ptr = free(ptr);"). Only treat it as a block-comment
+        # continuation when the leading star is followed by whitespace.
         return bool(re.match(r"^\*\s", stripped))
 
     for changed in added_lines(patch):
@@ -321,7 +344,11 @@ def _add_rule_findings(
             ):
                 continue
 
-            if not re.search(pattern, changed.text):
+            match_text = _strip_obvious_non_code(
+                changed.text,
+                c_family=is_c,
+            )
+            if not match_text or not re.search(pattern, match_text):
                 continue
 
             evidence = EvidenceRef(
@@ -477,7 +504,7 @@ def _add_ast_findings(
                             )
                         ],
                         file=filename,
-                        rule_id=f"python-ast-{node.func.id}",
+                        rule_id=f"security-{node.func.id}",
                     )
                 )
 
@@ -506,7 +533,7 @@ def _add_ast_findings(
                         )
                     ],
                     file=filename,
-                    rule_id="python-ast-bare-except",
+                    rule_id="python-bare-except",
                 )
             )
 
@@ -535,7 +562,7 @@ def _add_ast_findings(
                         )
                     ],
                     file=filename,
-                    rule_id="python-ast-assert",
+                    rule_id="python-assert",
                 )
             )
 
@@ -1093,13 +1120,14 @@ def _add_refcount_safety_findings(file_data: dict) -> list[Finding]:
         ):
             findings.append(
                 Finding(
-                    severity="HIGH",
+                    severity="MEDIUM",
                     category="REFCOUNT",
                     message=(
-                        f"Py_DECREF({variable}) is followed by returning "
-                        f"{variable}; inspect for a use-after-decref."
+                        f"Py_DECREF({variable}) is immediately followed by "
+                        f"returning {variable}; review ownership/lifetime before "
+                        "treating this as a use-after-decref."
                     ),
-                    confidence="high",
+                    confidence="medium",
                     source="deterministic",
                     evidence_refs=[
                         EvidenceRef(
@@ -1125,13 +1153,14 @@ def _add_refcount_safety_findings(file_data: dict) -> list[Finding]:
         if next_variable == variable:
             findings.append(
                 Finding(
-                    severity="HIGH",
+                    severity="MEDIUM",
                     category="REFCOUNT",
                     message=(
-                        f"{variable} is decremented twice consecutively; "
-                        "inspect for a double DECREF."
+                        f"{variable} is decremented twice consecutively in the "
+                        "added diff; review ownership paths for a possible "
+                        "double DECREF."
                     ),
-                    confidence="high",
+                    confidence="medium",
                     source="deterministic",
                     evidence_refs=[
                         EvidenceRef(
@@ -1434,6 +1463,7 @@ def analyze_patch(
             patch,
         )
     )
+    findings = _coalesce_python_rule_findings(findings)
     findings.sort(key=_finding_sort_key)
     return findings
 
@@ -1817,6 +1847,16 @@ def _current_risk_components(
         if component:
             components.add(component)
 
+    # A one-line refcount change may be legitimate and therefore produce no
+    # standalone refcount warning. It is still meaningful context for history.
+    patch = str(file_data.get("patch") or "")
+    added_text = "\n".join(line.text for line in added_lines(patch))
+    if re.search(
+        r"\bPy_(?:X)?(?:INCREF|DECREF|NEWREF|SETREF)\s*\(",
+        added_text,
+    ):
+        components.add("refcount")
+
     return components
 
 
@@ -1843,30 +1883,24 @@ def _add_history_findings(
             recent.append(text[:160])
     observed = " | ".join(recent)
 
-    if relevant:
-        component_text = ", ".join(sorted(relevant))
-        message = (
-            f"{filename} has historical precedent for the current "
-            f"{component_text} risk; review prior changes for precedent, "
-            "ownership, and backport expectations. Historical context is "
-            "supporting evidence, not proof of a defect."
-        )
-        description = (
-            "Recent commit history for the changed file overlaps "
-            "with a risk component detected in the current change."
-        )
-    else:
-        component_text = ", ".join(sorted(historical_components))
-        message = (
-            f"{filename} has recent repository-history signals associated "
-            f"with {component_text}; review prior changes for precedent, "
-            "ownership, and backport expectations. Historical context is "
-            "supporting evidence, not proof of a defect."
-        )
-        description = (
-            "Recent commit history for the changed file contains "
-            "component-specific maintenance signals."
-        )
+    # History is contextual evidence only.  Do not emit a finding when the
+    # historical keywords merely happen to occur in the file's recent commits;
+    # require an overlap with a component independently detected in the
+    # current change.
+    if not relevant:
+        return []
+
+    component_text = ", ".join(sorted(relevant))
+    message = (
+        f"{filename} has historical precedent for the current "
+        f"{component_text} risk; review prior changes for precedent, "
+        "ownership, and backport expectations. Historical context is "
+        "supporting evidence, not proof of a defect."
+    )
+    description = (
+        "Recent commit history for the changed file overlaps "
+        "with a risk component detected in the current change."
+    )
 
     return [
         Finding(
@@ -1929,9 +1963,45 @@ def analyze_file(
     )
     findings.extend(_add_history_findings(file_data, findings))
 
+    # Text rules are the resilient path for incomplete/synthetic hunks; AST
+    # findings use the same public rule IDs and therefore must not duplicate
+    # an already-emitted deterministic finding for the same changed construct.
+    findings = _coalesce_python_rule_findings(findings)
     findings.sort(key=_finding_sort_key)
 
     return findings, signature_changes
+
+
+def _coalesce_python_rule_findings(findings: Iterable[Finding]) -> list[Finding]:
+    """Keep one finding per Python construct, preferring AST evidence.
+
+    Line-based rules are necessary for incomplete diff hunks. When AST parsing
+    succeeds, however, the AST finding is stronger evidence and is retained;
+    otherwise the resilient line-based finding remains.
+    """
+    items = list(findings)
+    ast_ids = {
+        finding.rule_id
+        for finding in items
+        if finding.category == "AST"
+        and finding.rule_id in {
+            "security-eval",
+            "security-exec",
+            "python-bare-except",
+            "python-assert",
+        }
+    }
+    if not ast_ids:
+        return items
+
+    return [
+        finding
+        for finding in items
+        if not (
+            finding.category in {"python", "security"}
+            and finding.rule_id in ast_ids
+        )
+    ]
 
 
 def deduplicate_findings(
@@ -1979,3 +2049,17 @@ def analyze_files(
     findings = deduplicate_findings(findings)
 
     return findings, signature_changes
+
+
+# Public read-only metadata for benchmark/report tooling.  Keep this separate
+# from Finding severity/confidence so callers can distinguish "matched" from
+# "confirmed defect".
+RULE_METADATA = {
+    rule_id: {
+        "severity": values[1],
+        "confidence": values[2],
+        "category": values[3],
+        "message": values[4],
+    }
+    for rule_id, values in RULES.items()
+}

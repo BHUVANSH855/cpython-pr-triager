@@ -16,7 +16,6 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-
 SEVERITY_ORDER = {
     "CRITICAL": 0,
     "HIGH": 1,
@@ -73,6 +72,14 @@ def _require_nonempty_string(
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field_name} must be a non-empty string")
     return value
+
+
+def _validate_optional_string(value: Any, field_name: str) -> None:
+    """Validate an optional string while rejecting empty string values."""
+    if value is not None and (
+        not isinstance(value, str) or not value.strip()
+    ):
+        raise ValueError(f"{field_name} must be a non-empty string or None")
 
 
 def _normalise_evidence_refs(
@@ -197,26 +204,18 @@ class Finding:
             "Finding.message",
         )
 
-        if not isinstance(self.source, str):
-            raise TypeError(
-                "Finding.source must be a string"
-            )
-
-        if self.file is not None and not isinstance(
+        _require_nonempty_string(
+            self.source,
+            "Finding.source",
+        )
+        _validate_optional_string(
             self.file,
-            str,
-        ):
-            raise TypeError(
-                "Finding.file must be a string or None"
-            )
-
-        if self.rule_id is not None and not isinstance(
+            "Finding.file",
+        )
+        _validate_optional_string(
             self.rule_id,
-            str,
-        ):
-            raise TypeError(
-                "Finding.rule_id must be a string or None"
-            )
+            "Finding.rule_id",
+        )
 
         self.evidence_refs = _normalise_evidence_refs(
             self.evidence_refs,
@@ -249,18 +248,14 @@ class ProcessSignal:
             "ProcessSignal.message",
         )
 
-        if not isinstance(self.source, str):
-            raise TypeError(
-                "ProcessSignal.source must be a string"
-            )
-
-        if self.rule_id is not None and not isinstance(
+        _require_nonempty_string(
+            self.source,
+            "ProcessSignal.source",
+        )
+        _validate_optional_string(
             self.rule_id,
-            str,
-        ):
-            raise TypeError(
-                "ProcessSignal.rule_id must be a string or None"
-            )
+            "ProcessSignal.rule_id",
+        )
 
         self.evidence_refs = _normalise_evidence_refs(
             self.evidence_refs,
@@ -684,6 +679,26 @@ class ExpertContext:
                 )
             except (TypeError, ValueError):
                 self.typical_response_days = None
+            else:
+                if self.typical_response_days < 0:
+                    self.typical_response_days = None
+
+        try:
+            self.approval_rate_sample_size = max(
+                0,
+                int(self.approval_rate_sample_size or 0),
+            )
+        except (TypeError, ValueError):
+            self.approval_rate_sample_size = 0
+
+        self.activity_unavailable = bool(self.activity_unavailable)
+        if self.activity_error is not None and not isinstance(
+            self.activity_error,
+            str,
+        ):
+            raise TypeError(
+                "ExpertContext.activity_error must be a string or None"
+            )
 
     @property
     def username(self) -> str:
