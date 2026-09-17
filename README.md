@@ -2,9 +2,12 @@
 
 An evidence-first maintainer-assist tool for `python/cpython`.
 
-The goal is not to replace maintainers. The tool gathers repository evidence,
-highlights review questions, routes changes toward current CODEOWNERS, checks
-process signals, and optionally asks an LLM to synthesise the evidence.
+CPython PR Triager gathers repository evidence, highlights technical and
+process review questions, routes changes toward current CODEOWNERS, and
+optionally uses an LLM to synthesize the collected evidence.
+
+The goal is **not** to replace maintainers or make merge decisions. The goal is
+to make the evidence and review surface easier for maintainers to inspect.
 
 ## Design principles
 
@@ -15,52 +18,82 @@ process signals, and optionally asks an LLM to synthesise the evidence.
 5. **Historical statistics are descriptive and reproducible, not universal truth.**
 6. **AI is a synthesis layer, not the decision maker.**
 7. **Incomplete evidence must be visible.**
+8. **Reviewer-specific claims require reviewer-specific evidence.**
+9. **Aggregate operation counts are not ownership analysis.**
+10. **Deterministic policy remains authoritative over AI output.**
+
+---
 
 ## Two distinct tools
 
 This repository ships two separate tools that do **not** share code:
 
-| Tool | File | How it works |
-|------|------|--------------|
-| **Python CLI** | `scripts/analyze.py` | Runs server-side. Full pagination, caching, retries, CODEOWNERS from the live repo. Use this for reliable results. |
-| **Web triager** | `index.html` | Runs in-browser. Calls the GitHub API directly. Fetches CODEOWNERS live from the PR's base SHA, same as the CLI. Faster to share, but fetches only **one page per GitHub endpoint** (no follow-up pagination) — the page shows an "EVIDENCE: PARTIAL" notice when a page limit is hit. It has no server-side caching, and it never calls an AI model (there is no LLM synthesis step in the browser tool, only the same deterministic static-analysis rules). |
+| Tool            | File                 | How it works                                                                                                                                                                                                                                                                                                                               |
+| --------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Python CLI**  | `scripts/analyze.py` | Runs server-side. Uses complete pagination, local caching, retries, live CODEOWNERS, deterministic analysis, policy evaluation, and optional AI synthesis. This is the authoritative/recommended path.                                                                                                                                     |
+| **Web triager** | `index.html`         | Runs entirely in the browser and calls the GitHub API directly. It fetches CODEOWNERS from the PR's base SHA and provides a quick-look version of the deterministic analysis. It fetches only one page per GitHub endpoint and therefore can report partial evidence when pagination limits are reached. It does not perform AI synthesis. |
 
-The web UI (`index.html`) has its own implementation of the deterministic
-analysis rules, kept deliberately smaller than the Python package. Treat it
-as a quick-look tool, not a source of truth; the CLI is the reliable,
-completely-paginated path.
+The web UI has its own, deliberately smaller implementation of the deterministic
+analysis rules. It is intended for quick inspection and sharing rather than
+being a replacement for the fully paginated CLI.
+
+When evidence completeness matters, prefer the Python CLI.
+
+---
 
 ## Requirements
 
-- Python 3.11+
-- No third-party Python packages at runtime
-- `pytest` is required to run the test suite (`pip install -e ".[test]"`)
-- Internet access to the GitHub REST API
-- `GITHUB_TOKEN` is strongly recommended (5 000 req/hr vs 60 unauthenticated)
+* Python 3.11+
+* No third-party Python packages are required at runtime
+* `pytest` is required to run the test suite
+* Internet access to the GitHub REST API
+* A `GITHUB_TOKEN` is strongly recommended
 
-Optional:
+Install the project and test dependencies with:
 
-- `ANTHROPIC_API_KEY` for AI synthesis
+```powershell
+pip install -e ".[test]"
+```
 
-## Run
+### GitHub API rate limits
 
-From the **project root** (required so the package import works):
+Authenticated GitHub API requests provide substantially more capacity than
+unauthenticated requests.
+
+Set your token before running the CLI:
+
+```powershell
+$env:GITHUB_TOKEN="YOUR_TOKEN"
+```
+
+Do not commit or otherwise expose the token.
+
+---
+
+# Run
+
+Run commands from the **project root**.
+
+Analyze a pull request:
 
 ```powershell
 python scripts/analyze.py 123456
 ```
 
-JSON output:
+Generate JSON output:
 
 ```powershell
 python scripts/analyze.py 123456 --json > report.json
 ```
 
-Skip linked issue history (faster, but less evidence — prints a warning):
+Skip linked issue history:
 
 ```powershell
 python scripts/analyze.py 123456 --no-linked-issues
 ```
+
+This is faster and reduces API work, but it deliberately produces a less
+complete evidence package and reports that limitation.
 
 Disable the local HTTP cache:
 
@@ -68,236 +101,715 @@ Disable the local HTTP cache:
 python scripts/analyze.py 123456 --no-cache
 ```
 
-> **Important:** always run from the repository root, not from inside `scripts/`.
-> The package import (`from scripts.triager import ...`) requires the root to be
-> on `sys.path`.  Running `python scripts/analyze.py` from the root works because
-> `analyze.py` adds the root to `sys.path` automatically.  Running
-> `cd scripts && python analyze.py` will fail with `ModuleNotFoundError`.
+> **Important:** run the command from the repository root, not from inside
+> `scripts/`. The CLI adds the project root to `sys.path` when launched from
+> the root, allowing imports such as `from scripts.triager import ...`.
 
-## Historical statistics
+---
 
-Generate a real historical sample (walks the full paginated endpoint):
+# Evidence model
+
+The triager separates **collected evidence**, **deterministic analysis**, and
+**synthesis**.
+
+Conceptually:
+
+```text
+GitHub repository
+       │
+       ▼
+Evidence collection
+       │
+       ├── PR metadata
+       ├── changed files
+       ├── reviews
+       ├── review comments
+       ├── review threads
+       ├── issue comments
+       ├── timeline
+       ├── linked issues
+       ├── CI/checks
+       ├── CODEOWNERS
+       └── repository policy
+       │
+       ▼
+Evidence normalization
+       │
+       ▼
+Deterministic analysis
+       │
+       ├── technical review prompts
+       ├── process signals
+       ├── reviewer state
+       ├── routing
+       └── historical context
+       │
+       ▼
+Maintainer-facing report
+       │
+       └── optional AI synthesis
+```
+
+The tool attempts to distinguish between:
+
+* **Observed evidence**
+* **Derived deterministic signals**
+* **Review prompts**
+* **Historical context**
+* **Missing or unavailable evidence**
+* **AI-generated synthesis**
+
+A missing evidence source is not silently treated as an empty successful
+result.
+
+---
+
+# What the analyzer examines
+
+## Repository evidence
+
+The CLI collects and analyzes:
+
+* PR metadata
+* changed-file information
+* complete changed-file pagination
+* submitted PR reviews
+* inline review comments
+* issue comments
+* issue timeline events
+* bot-vs-human timeline activity
+* review threads
+* linked issue references
+* linked issue comments and timeline information
+* PEP references
+* `discuss.python.org` references
+* current repository labels
+* PR-base CODEOWNERS
+* PR head checks
+* legacy commit statuses
+* branch and backport information
+* repository policy data
+
+Where GitHub exposes paginated data, the CLI attempts to walk the complete
+available result set rather than treating the first page as the complete
+dataset.
+
+---
+
+# Review evidence
+
+Reviewer activity is deliberately separated from generic reviewer routing.
+
+The tool distinguishes between:
+
+* submitted PR reviews
+* inline review comments
+* general issue comments
+* review-thread state
+
+A comment written by a reviewer is not automatically treated as a submitted
+review.
+
+Reviewer activity can include evidence such as:
+
+* submitted review counts
+* approval counts
+* change-request counts
+* approval-rate samples
+* response-time statistics
+* recent review activity
+* recurring review phrases
+
+These measurements are derived from the reviewer's actual GitHub activity
+when the required evidence is available.
+
+If the required reviewer evidence cannot be fetched, the tool reports that
+availability state rather than inventing a reviewer-specific conclusion.
+
+---
+
+# Review threads
+
+Unresolved review threads are treated as first-class review evidence.
+
+The tool records thread state rather than reducing all review activity to
+simple approval/change-request counts.
+
+This allows the report to distinguish situations such as:
+
+```text
+APPROVED review
++
+unresolved review thread
+```
+
+from:
+
+```text
+APPROVED review
++
+no unresolved threads
+```
+
+Review-thread evidence can be unavailable independently of other review
+evidence. An unavailable thread query is therefore not interpreted as
+"zero unresolved threads."
+
+---
+
+# Process signals
+
+The deterministic policy layer evaluates repository process information such
+as:
+
+* current labels
+* `DO-NOT-MERGE`
+* `awaiting changes`
+* `awaiting merge`
+* NEWS requirements
+* `skip news` waivers
+* test-coverage signals
+* review state
+* unresolved review threads
+* branch lifecycle
+* backport labels
+* CI/check state
+* required-check state
+
+The policy layer is intentionally deterministic.
+
+AI synthesis does not override authoritative process policy.
+
+---
+
+# CPython branch policy
+
+Branch lifecycle is evaluated using the repository's branch-policy snapshot
+rather than being inferred solely from version numbers.
+
+The current policy snapshot represents:
+
+| Branch | Lifecycle status     |
+| ------ | -------------------- |
+| `main` | Feature development  |
+| `3.15` | Prerelease           |
+| `3.14` | Bugfix / maintenance |
+| `3.13` | Bugfix / maintenance |
+| `3.12` | Security-fix-only    |
+| `3.11` | Security-fix-only    |
+| `3.10` | Security-fix-only    |
+
+These statuses are treated as policy evidence.
+
+The analyzer can emit review signals when the target branch, labels, or change
+classification appear inconsistent with the current lifecycle policy.
+
+The policy data is repository-maintained and can be updated independently of
+the analyzer implementation.
+
+---
+
+# Backport detection
+
+The analyzer recognizes the current spaced CPython format:
+
+```text
+needs backport to 3.13
+```
+
+It also recognizes the older hyphenated form:
+
+```text
+needs-backport-to-3.13
+```
+
+The legacy form is retained for compatibility with older pull requests.
+
+---
+
+# Technical review prompts
+
+The static analyzer scans newly added diff lines where possible.
+
+A matching pattern is **not automatically a vulnerability or correctness
+bug**. Findings are review prompts intended to direct human inspection.
+
+## C / memory safety
+
+Examples include:
+
+* `gets()` → CRITICAL
+* `sprintf()` → CRITICAL
+* `strcpy()` / `strcat()` → HIGH
+* raw `malloc()` / `free()` / `realloc()` / `calloc()` → HIGH
+* `PyCObject_*` usage → CRITICAL
+
+The analyzer can point maintainers toward CPython-specific alternatives where
+appropriate, such as `PyOS_snprintf()`, `PyMem_*`, or `PyCapsule`.
+
+---
+
+## CPython internals
+
+The analyzer checks for patterns involving:
+
+* private `_Py_*` API usage
+* `PyErr_Clear()` silently discarding exceptions
+* `_Py_IDENTIFIER`
+* GIL/thread-state boundaries
+* `Py_BEGIN_ALLOW_THREADS` / `Py_END_ALLOW_THREADS`
+* free-threading-sensitive patterns
+* other CPython-internal review surfaces
+
+These findings are prompts for maintainer review, not automatic defect
+classifications.
+
+---
+
+## Python
+
+The analyzer checks for patterns including:
+
+* `eval()` / `exec()`
+* `pickle.load()`
+* `subprocess(..., shell=True)`
+* `tempfile.mktemp()`
+* `hashlib.md5()` / `hashlib.sha1()`
+* bare `except:`
+* `assert` in production code
+* `global` statements
+* `DeprecationWarning` without `stacklevel=`
+
+Where practical, the analyzer uses additional context to reduce false
+positives. For example, `eval()` findings are AST-confirmed rather than being
+based only on a raw text match.
+
+---
+
+# Refcount analysis
+
+Refcount handling is intentionally conservative.
+
+The analyzer **does not infer a leak or over-decref merely from aggregate
+INCREF/DECREF counts across a diff**.
+
+For example, this does not by itself establish a leak:
+
+```c
+Py_INCREF(obj);
+Py_INCREF(obj);
+```
+
+Likewise, a difference between the number of `Py_INCREF()` and
+`Py_DECREF()` operations does not establish that the operations refer to the
+same object, ownership path, or lifetime.
+
+The triager therefore avoids the previous diff-wide count heuristic.
+
+Instead, refcount review focuses on localized structural patterns that are
+more useful as human review prompts, such as suspicious lifetime operations
+around a specific variable.
+
+These findings should be interpreted as:
+
+```text
+"Review this ownership/lifetime pattern."
+```
+
+not:
+
+```text
+"This code definitely leaks or over-decrefs."
+```
+
+This distinction is particularly important for CPython C code, where ownership
+can depend on API contracts, control flow, borrowed references, error paths,
+reference-stealing operations, and object lifetime conventions.
+
+---
+
+# API and compatibility review
+
+The analyzer checks for compatibility-sensitive changes such as:
+
+* public Python signature changes
+* positional-only parameter changes
+* keyword-only parameter changes
+* removed parameters
+* public C header changes
+* stable-ABI-sensitive changes
+* grammar changes
+
+Grammar findings include the relevant regeneration workflow:
+
+```powershell
+make regen-pegen && make regen-all && make regen-clinic
+```
+
+The purpose is to identify areas that deserve maintainer inspection rather than
+to automatically classify a change as incompatible.
+
+---
+
+# CODEOWNERS
+
+The tool fetches CODEOWNERS from the PR's **base SHA**, rather than assuming
+that the current default branch represents the ownership rules that applied to
+the PR.
+
+The candidates are checked in this order:
+
+1. `.github/CODEOWNERS`
+2. `CODEOWNERS`
+3. `docs/CODEOWNERS`
+
+The last-matching-pattern rule is respected.
+
+This allows routing decisions to be based on repository ownership information
+that is relevant to the analyzed PR.
+
+---
+
+# Reviewer routing data
+
+`scripts/triager/reviewer_profiles.py` contains project-maintained,
+subsystem-specific routing guidance.
+
+For example, a subsystem may have guidance that a particular generated file
+requires a regeneration command.
+
+This information is **generic subsystem guidance**.
+
+It is not a record of anything a named individual has personally said or done.
+
+The tool therefore keeps two concepts separate:
+
+```text
+Generic subsystem guidance
+        ≠
+Actual reviewer behavior
+```
+
+Actual reviewer behavior is derived from
+`scripts/triager/reviewer_activity.py` using live GitHub evidence when
+available.
+
+The tool does not substitute generic routing data for unavailable
+reviewer-specific evidence.
+
+---
+
+# Historical statistics
+
+Generate a historical sample with:
 
 ```powershell
 python scripts/analyze.py --learn-patterns 500 --output-patterns data/patterns.json
 ```
 
-The collector walks the paginated pull-request endpoint rather than pretending
-that a single 100-result search page is a 500-PR dataset.
+The collector walks the paginated pull-request endpoint instead of treating a
+single search page as a complete historical sample.
 
-The output records requested sample size, candidate population, actual collected
-records, sampling method, generation timestamp, size percentiles, merged-PR
-statistics, label frequencies, and base-branch frequencies.
+The generated data records information such as:
 
-These statistics are descriptive. They should not be treated as proof that a
-particular PR is abnormal or unsafe.
+* requested sample size
+* candidate population
+* actual collected records
+* sampling method
+* generation timestamp
+* size percentiles
+* merged-PR statistics
+* label frequencies
+* base-branch frequencies
 
-## AI synthesis
+Historical statistics are **descriptive**.
 
-No AI key is required for the deterministic report. To enable AI synthesis:
+They should not be treated as proof that:
 
-**Anthropic:**
+* a particular PR is abnormal
+* a particular change is unsafe
+* a particular reviewer will approve a change
+* a PR should or should not merge
+
+Historical data provides context, not authority.
+
+---
+
+# AI synthesis
+
+No AI key is required for the deterministic report.
+
+AI synthesis is optional and runs **after** the deterministic evidence package
+has been constructed.
+
+## Anthropic
 
 ```powershell
 $env:ANTHROPIC_API_KEY="sk-ant-..."
 python scripts/analyze.py 123456 --ai
 ```
 
-**Gemini (free tier):**
+## Gemini
 
 ```powershell
 $env:GEMINI_API_KEY="..."
 python scripts/analyze.py 123456 --ai --ai-provider gemini
 ```
 
-The deterministic report is constructed first. The model receives that evidence
-package and is instructed to distinguish facts from inference and never claim
-maintainer authority.
+The deterministic report is constructed first.
 
-Set a different model if required:
+The model receives the collected evidence and deterministic analysis and is
+instructed to:
+
+* distinguish observed facts from inference
+* identify uncertainty
+* avoid claiming maintainer authority
+* avoid inventing missing evidence
+* summarize rather than override deterministic policy
+
+AI output should therefore be treated as **synthesis and explanation**, not as
+the source of truth.
+
+Set a different Anthropic model when required:
 
 ```powershell
 $env:ANTHROPIC_MODEL="claude-opus-5"
 ```
 
-## What the analyzer examines
+---
 
-### Repository evidence
+# Local cache
 
-- PR metadata
-- complete changed-file pagination
-- complete reviews
-- complete inline review comments
-- complete issue comments
-- complete issue timeline (with bot events correctly identified)
-- linked issue references (gh-NNNNN, bpo-NNN, closes #NNN, etc.)
-- linked issue comments/timeline
-- PEP references
-- discuss.python.org thread URLs
-- current repository labels
-- PR-base CODEOWNERS (fetched live from the repo at the base SHA)
-- PR head checks/statuses
+The CLI uses a local HTTP cache to reduce repeated GitHub API requests.
 
-### Process signals
+By default, cached responses are stored under:
 
-- current labels and their meanings
-- `DO-NOT-MERGE`
-- `awaiting changes` / `awaiting merge`
-- NEWS entry presence (or `skip news` waiver)
-- test coverage signals
-- review state (approvals, change requests, stale PRs)
-- maintenance-branch policy signals
-  - CPython branch lifecycle is evaluated from the repository's branch-policy
-    snapshot rather than inferred from version numbers:
-
-    | Branch | Current lifecycle status |
-    |--------|--------------------------|
-    | `main` | Feature development |
-    | `3.15` | Prerelease |
-    | `3.14` | Bugfix / maintenance |
-    | `3.13` | Bugfix / maintenance |
-    | `3.12` | Security-fix-only |
-    | `3.11` | Security-fix-only |
-    | `3.10` | Security-fix-only |
-  - The analyzer treats these statuses as policy evidence and emits a review
-    signal when a PR's labels or target branch appear inconsistent with the
-    current lifecycle policy.
-- `needs backport to X.Y` label detection (current spaced format; the
-  legacy hyphenated `needs-backport-to-X.Y` is also recognized for
-  compatibility with older PRs, but current CPython PRs use the spaced form)
-- current CI/check state
-
-### Technical review prompts
-
-**C / memory safety:**
-- `gets()` → CRITICAL
-- `sprintf()` → CRITICAL (use `PyOS_snprintf()`)
-- `strcpy()` / `strcat()` → HIGH
-- `malloc()`, `free()`, `realloc()`, `calloc()` → HIGH (use `PyMem_*`)
-- `PyCObject_*` → CRITICAL (removed; use `PyCapsule`)
-
-**CPython internals:**
-- Private `_Py_*` API usage
-- `PyErr_Clear()` silently discarding exceptions
-- `_Py_IDENTIFIER` (deprecated; use `&_Py_ID()`)
-- GIL/thread-state boundaries (`Py_BEGIN/END_ALLOW_THREADS`)
-- Free-threading risk in GIL-sensitive subsystems (with `--disable-gil` note)
-
-**Python:**
-- `eval()` / `exec()` — AST-confirmed
-- `pickle.load()` — untrusted input risk
-- `subprocess shell=True` — injection risk
-- `tempfile.mktemp()` — TOCTOU race
-- `hashlib.md5()` / `hashlib.sha1()` — cryptographically broken
-- bare `except:` — catches `BaseException`
-- `assert` in non-test production code
-- `global` statement — module-level shared state
-- `DeprecationWarning` without `stacklevel=` — shows wrong call site
-
-**API / compatibility:**
-- Public Python signature changes (positional-only, keyword-only, removed params)
-- Public C header changes (stable ABI impact)
-- Grammar changes (includes exact `make regen-pegen && make regen-all && make regen-clinic` command)
-- Low-confidence refcount imbalance prompts (INCREF vs DECREF count)
-
-The analyzer scans newly added diff lines where possible. It does not claim
-that a matching pattern is itself a vulnerability.
-
-## CODEOWNERS
-
-The tool fetches the live CODEOWNERS file from the PR base SHA using these
-candidates in order:
-
-1. `.github/CODEOWNERS`
-2. `CODEOWNERS`
-3. `docs/CODEOWNERS`
-
-The last-matching-pattern rule is followed correctly.
-
-## Reviewer routing data — what's real and what's generic
-
-`scripts/triager/reviewer_profiles.py` groups a per-subsystem review
-checklist under the username that owns that area in CODEOWNERS (e.g.
-"changes to `bytecodes.c` usually need `make regen-cases`"). **This
-checklist is generic, project-maintained guidance about the subsystem —
-it is never a record of anything the named individual has actually said,
-and it must not be presented as a quote or personal characterization.**
-
-Anything that claims to describe what a *specific person* actually does —
-their approval rate, what they've recently asked for in reviews, response
-patterns — comes only from `scripts/triager/reviewer_activity.py`, which
-computes it live from that person's real, freshly-fetched GitHub review
-comments (cached for 24h). If that live data isn't available, the tool
-omits the per-person claim rather than substituting a guess.
-
-## Local cache
-
-Responses are cached under `.triager-cache/` (git-ignored, expires in 15 min).
-
-```powershell
-$env:CPYTHON_TRIAGER_CACHE_TTL="3600"   # change TTL in seconds
-$env:CPYTHON_TRIAGER_CACHE="C:\temp\cache"  # change location
+```text
+.triager-cache/
 ```
 
-## GitHub authentication
+The cache directory is git-ignored.
+
+The default cache lifetime is 15 minutes.
+
+Change the TTL:
+
+```powershell
+$env:CPYTHON_TRIAGER_CACHE_TTL="3600"
+```
+
+Change the cache location:
+
+```powershell
+$env:CPYTHON_TRIAGER_CACHE="C:\temp\cache"
+```
+
+The cache is an optimization and is not a substitute for evidence freshness
+where freshness is explicitly required.
+
+---
+
+# GitHub authentication
+
+Set the GitHub token:
 
 ```powershell
 $env:GITHUB_TOKEN="YOUR_TOKEN"
 ```
 
-Do not commit the token. Without a token the API rate limit is 60 requests/hr.
+Do not commit the token.
 
-## Testing
+Without authentication, GitHub API rate limits are significantly lower and
+some evidence collection may become unavailable or partial.
 
-The canonical, supported way to run the test suite is `pytest` (some test
-files depend on it directly and will fail to even import under plain
-`unittest`):
+---
+
+# Testing
+
+The canonical test command is:
 
 ```powershell
 pip install -e ".[test]"
 python -m pytest -q
 ```
 
-This is also exactly what CI runs (`.github/workflows/tests.yml`).
+The same test suite is used by CI through:
 
-Test files:
+```text
+.github/workflows/tests.yml
+```
 
-| File | What it covers |
-|------|---------------|
-| `tests/test_triager.py` | `analyze.py` orchestration layer |
-| `tests/test_analyzers.py` | Static analysis rules |
-| `tests/test_policy.py` | Process/policy signals, branch rules, backport regex |
-| `tests/test_references.py` | Reference extraction (gh-, bpo-, discuss.python.org) |
-| `tests/test_github.py` | GitHub client (pagination, caching, retries) |
-| `tests/test_reviewer_profiles.py` | Static subsystem routing data (see note below) |
-| `tests/test_reviewer_activity.py` | Live, per-reviewer activity derived from real comments |
+The current repository test suite contains **757 tests** covering the major
+components of the project.
 
-## Important limitations
+The most recent full local validation for this version completed with:
 
-No static heuristic, historical statistic, or LLM can establish that a CPython
-change is correct by itself.
+```text
+757 passed
+```
 
-A high-quality triage result answers:
+## Test coverage areas
+
+| File                                 | Coverage                                                |
+| ------------------------------------ | ------------------------------------------------------- |
+| `tests/test_triager.py`              | `analyze.py` orchestration                              |
+| `tests/test_analyzers.py`            | Static analysis rules                                   |
+| `tests/test_policy.py`               | Process/policy signals, branch rules, backport handling |
+| `tests/test_references.py`           | GitHub, PEP, and discussion reference extraction        |
+| `tests/test_github.py`               | GitHub client, pagination, caching, retries             |
+| `tests/test_reviewer_profiles.py`    | Static subsystem routing data                           |
+| `tests/test_reviewer_activity.py`    | Live reviewer activity derived from GitHub evidence     |
+| `tests/test_snapshot.py`             | Evidence snapshot normalization and round trips         |
+| `tests/test_report.py`               | Report construction and evidence presentation           |
+| `tests/test_models.py`               | Data models and serialization                           |
+| `tests/test_history.py`              | Historical statistics                                   |
+| `tests/test_ai.py`                   | AI synthesis behavior                                   |
+| `tests/test_providers.py`            | AI provider integrations                                |
+| `tests/test_codeowners.py`           | CODEOWNERS parsing and matching                         |
+| `tests/test_update_branch_policy.py` | Branch-policy update tooling                            |
+
+---
+
+# Important limitations
+
+CPython PR Triager is a **maintainer-assist tool**, not an automated merge
+authority.
+
+No static heuristic, historical statistic, or LLM can establish by itself
+that a CPython change is correct.
+
+A high-quality triage result should answer:
 
 1. What evidence was collected?
-2. What is definitely observed?
-3. What deserves human review?
-4. Who appears relevant according to current repository ownership?
-5. What process gates remain?
-6. What evidence is missing or uncertain?
+2. What is directly observed?
+3. What is deterministically derived?
+4. What deserves human review?
+5. Which repository ownership information is relevant?
+6. What process gates remain?
+7. What evidence is missing or unavailable?
+8. Where does uncertainty remain?
 
-That is the standard this project is designed around.
+The tool is deliberately designed to expose those distinctions rather than
+hide them behind a single confidence score.
 
-## License
+---
 
-Apache License 2.0 — see [LICENSE](LICENSE). This project is independent
-tooling for working with `python/cpython`; it is not part of CPython
-itself and is not covered by the PSF License.
+# Evidence completeness
 
-## Changelog / audit history
+Different data sources can have different availability states.
 
-This project has been through external audit passes; see
-[CHANGELOG.md](CHANGELOG.md) for exactly what was fixed in response to
-each, and what was deliberately deferred and why. If you're deciding
-whether to trust this tool for a specific use, read that file's "Known,
-currently-accepted limitations" section before the rest of this README.
+For example:
+
+```text
+reviews: available
+review_threads: unavailable
+```
+
+does **not** mean:
+
+```text
+review_threads: zero
+```
+
+Similarly, a browser-side one-page API result does not imply that the complete
+GitHub collection has been retrieved.
+
+When evidence is incomplete, the tool should expose that limitation so that a
+maintainer can decide whether additional investigation is necessary.
+
+---
+
+# Web triager limitations
+
+`index.html` is designed for convenience and quick inspection.
+
+It:
+
+* runs entirely in the browser
+* talks directly to GitHub
+* has no server-side cache
+* does not call an AI model
+* has its own smaller deterministic analyzer
+* fetches only one page per GitHub endpoint
+* can therefore produce partial evidence when GitHub pagination limits are
+  reached
+
+When the web tool encounters a pagination limit, it indicates that the
+evidence is partial.
+
+For complete evidence collection, use:
+
+```powershell
+python scripts/analyze.py <PR_NUMBER>
+```
+
+---
+
+# Project structure
+
+```text
+.
+├── .github/
+│   └── workflows/
+│       └── tests.yml
+├── data/
+│   ├── .gitkeep
+│   ├── branch-policy.json
+│   └── cpython-review-policy.json
+├── scripts/
+│   ├── analyze.py
+│   ├── check_ci.py
+│   ├── update_branch_policy.py
+│   └── triager/
+│       ├── ai.py
+│       ├── analyzers.py
+│       ├── codeowners.py
+│       ├── diff.py
+│       ├── github.py
+│       ├── history.py
+│       ├── models.py
+│       ├── policy.py
+│       ├── providers.py
+│       ├── references.py
+│       ├── report.py
+│       ├── reviewer_activity.py
+│       ├── reviewer_profiles.py
+│       └── snapshot.py
+├── tests/
+├── index.html
+├── review-ui.css
+├── pyproject.toml
+├── CHANGELOG.md
+├── LICENSE
+└── README.md
+```
+
+---
+
+# Changelog and audit history
+
+The project has gone through multiple correctness and security-oriented audit
+passes.
+
+See [`CHANGELOG.md`](CHANGELOG.md) for:
+
+* changes made in response to audits
+* known limitations
+* intentionally deferred work
+* changes to evidence collection
+* changes to reviewer analysis
+* changes to policy handling
+* changes to static analysis
+
+Before relying on the tool for a particular triage workflow, review the
+**Known, currently-accepted limitations** section of the changelog.
+
+---
+
+# License
+
+Apache License 2.0 — see [`LICENSE`](LICENSE).
+
+CPython PR Triager is independent tooling for working with
+`python/cpython`. It is **not part of CPython itself** and is not covered by
+the Python Software Foundation License.
