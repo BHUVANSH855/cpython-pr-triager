@@ -8,6 +8,7 @@ Its responsibilities are to:
 
 * preserve the evidence returned by the collector;
 * preserve collection failures instead of turning them into empty evidence;
+* preserve authoritative review-thread resolution state;
 * describe the completeness/freshness of each evidence source;
 * bind evidence to the PR base/head SHAs when known;
 * preserve provenance and collection metadata;
@@ -35,6 +36,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
+
+from scripts.triager.models import ReviewThreadCollection
 
 SCHEMA_VERSION = 2
 
@@ -106,6 +109,7 @@ EVIDENCE_SOURCES: tuple[str, ...] = (
     "files",
     "reviews",
     "review_comments",
+    "review_threads",
     "issue_comments",
     "timeline",
     "linked_issues",
@@ -120,6 +124,7 @@ OPTIONAL_EMPTY_EVIDENCE_SOURCES: frozenset[str] = frozenset(
     {
         "reviews",
         "review_comments",
+        "review_threads",
         "issue_comments",
         "timeline",
         "linked_issues",
@@ -459,6 +464,105 @@ class EvidenceRecord:
         )
 
 
+def _normalise_review_threads(
+    value: Any,
+) -> ReviewThreadCollection | None:
+    """Normalize collected review-thread evidence.
+
+    GitHub's GraphQL collector currently emits ``id`` for the thread
+    identifier, while the public model uses the more explicit
+    ``thread_id`` field.  Normalize that boundary here so persisted
+    snapshots, replayed snapshots, and live collection all use the same
+    model shape.
+    """
+    if value is None:
+        return None
+
+    if isinstance(value, ReviewThreadCollection):
+        return value
+
+    if isinstance(value, Mapping):
+        payload = deepcopy(dict(value))
+        raw_threads = payload.get("threads", [])
+
+        if not isinstance(raw_threads, list):
+            payload["threads"] = []
+            payload.setdefault(
+                "status",
+                "failed",
+            )
+            payload.setdefault(
+                "error",
+                "review_threads.threads must be a list",
+            )
+            # ``ReviewThreadCollection.as_dict()`` also exposes derived
+            # fields such as ``unresolved_count`` and ``total_count``.
+            # Those fields are serialization output, not constructor
+            # arguments, so only pass the actual model fields back in.
+            return ReviewThreadCollection(
+                status=payload.get("status", "unavailable"),
+                threads=payload.get("threads", []),
+                error=payload.get("error"),
+                pages_fetched=payload.get("pages_fetched", 0),
+            )
+
+        normalized_threads: list[dict[str, Any]] = []
+
+        for thread in raw_threads:
+            if not isinstance(thread, Mapping):
+                continue
+
+            normalized = deepcopy(dict(thread))
+
+            if (
+                "thread_id" not in normalized
+                and "id" in normalized
+            ):
+                normalized["thread_id"] = normalized.pop("id")
+
+            normalized_threads.append(normalized)
+
+        payload["threads"] = normalized_threads
+
+        # ``ReviewThreadCollection.as_dict()`` also exposes derived
+        # fields such as ``unresolved_count`` and ``total_count``.
+        # Those fields are serialization output, not constructor
+        # arguments, so only pass the actual model fields back in.
+        return ReviewThreadCollection(
+            status=payload.get("status", "unavailable"),
+            threads=payload.get("threads", []),
+            error=payload.get("error"),
+            pages_fetched=payload.get("pages_fetched", 0),
+        )
+
+    if isinstance(value, list):
+        normalized_threads = []
+
+        for thread in value:
+            if not isinstance(thread, Mapping):
+                continue
+
+            normalized = deepcopy(dict(thread))
+
+            if (
+                "thread_id" not in normalized
+                and "id" in normalized
+            ):
+                normalized["thread_id"] = normalized.pop("id")
+
+            normalized_threads.append(normalized)
+
+        return ReviewThreadCollection(
+            status="complete",
+            threads=normalized_threads,
+        )
+
+    return ReviewThreadCollection(
+        status="failed",
+        error="invalid review_threads evidence payload",
+    )
+
+
 @dataclass
 class ReviewSnapshot:
     """Evidence snapshot for one CPython pull request.
@@ -490,6 +594,7 @@ class ReviewSnapshot:
     files: list[dict[str, Any]] = field(default_factory=list)
     reviews: list[dict[str, Any]] = field(default_factory=list)
     review_comments: list[dict[str, Any]] = field(default_factory=list)
+    review_threads: ReviewThreadCollection | None = None
     issue_comments: list[dict[str, Any]] = field(default_factory=list)
     timeline: list[dict[str, Any]] = field(default_factory=list)
 
@@ -580,6 +685,10 @@ class ReviewSnapshot:
             else:
                 setattr(self, attr, deepcopy(value))
 
+        self.review_threads = _normalise_review_threads(
+            self.review_threads
+        )
+
         if not isinstance(self.base_file_contents, dict):
             self.base_file_contents = {}
         else:
@@ -668,17 +777,14 @@ class ReviewSnapshot:
     def _ensure_evidence_statuses(self) -> None:
         """Populate missing per-source statuses conservatively.
 
-        This method deliberately never upgrades a source to COMPLETE merely
-        because a field happens to be present.
+        Directly constructed legacy snapshots do not have enough collector
+        metadata to prove that non-empty evidence is exhaustive.  Therefore
+        explicit statuses, collector statistics, and explicit errors take
+        precedence.  Only when none of that metadata exists do we fall back
+        to the historical field-shape inference for compatibility.
 
-        Legacy snapshots with no explicit status information can only safely
-        infer:
-
-        * FAILED when an explicit error exists;
-        * EMPTY when an empty collection is known to be represented;
-        * NOT_COLLECTED when the source is absent.
-
-        ``collect()`` supplies stronger statuses from collector metadata.
+        In particular, a bounded collection is never silently upgraded to
+        COMPLETE.
         """
         statuses = dict(self.evidence_statuses)
 
@@ -690,28 +796,26 @@ class ReviewSnapshot:
                 statuses[source] = EvidenceStatus.FAILED
                 continue
 
-            if has_scoped_error:
-                # Per-item retrieval failures mean the source cannot be
-                # represented as exhaustive.  If useful evidence exists, mark
-                # it PARTIAL; otherwise mark it FAILED.
-                value = evidence.get(source)
-                has_value = bool(value)
-                if source == "source_file_contents":
-                    has_value = bool(
-                        source_file_contents.get("base")
-                        or source_file_contents.get("head")
-                    )
-                elif source == "check_runs":
-                    has_value = bool(
-                        _check_runs_value(value).get("check_runs")
-                    )
+            status_from_metadata = self._status_from_collection_metadata(
+                source
+            )
+            if status_from_metadata is not None:
+                statuses[source] = status_from_metadata
+                continue
+
+            if self._source_has_error(self.evidence_errors, source):
+                value = self._evidence_value(source)
                 statuses[source] = (
                     EvidenceStatus.PARTIAL
-                    if has_value
+                    if self._has_evidence_value(source, value)
                     else EvidenceStatus.FAILED
                 )
                 continue
 
+            # Preserve compatibility for snapshots created directly by older
+            # callers that supplied evidence fields but no collector metadata.
+            # This fallback is intentionally documented as an inference rather
+            # than proof of exhaustive collection.
             if source == "pr":
                 statuses[source] = (
                     EvidenceStatus.COMPLETE
@@ -721,19 +825,18 @@ class ReviewSnapshot:
                 continue
 
             if source == "codeowners":
-                # A missing CODEOWNERS file is a legitimate repository state.
-                # Without explicit collector metadata we cannot prove whether
-                # the absence means "no CODEOWNERS" or "not collected".
-                if self.codeowners_path or self.codeowners_text:
-                    statuses[source] = EvidenceStatus.COMPLETE
-                else:
-                    statuses[source] = EvidenceStatus.NOT_COLLECTED
+                statuses[source] = (
+                    EvidenceStatus.COMPLETE
+                    if self.codeowners_path or self.codeowners_text
+                    else EvidenceStatus.NOT_COLLECTED
+                )
                 continue
 
             if source == "check_runs":
+                check_runs = _check_runs_value(self.check_runs)
                 statuses[source] = (
                     EvidenceStatus.EMPTY
-                    if self.check_runs.get("total_count", 0) == 0
+                    if check_runs.get("total_count", 0) == 0
                     else EvidenceStatus.COMPLETE
                 )
                 continue
@@ -747,23 +850,18 @@ class ReviewSnapshot:
                 continue
 
             if source == "source_file_contents":
-                has_base = bool(
-                    self.source_file_contents.get("base")
+                has_base = bool(self.source_file_contents.get("base"))
+                has_head = bool(self.source_file_contents.get("head"))
+                statuses[source] = (
+                    EvidenceStatus.COMPLETE
+                    if has_base or has_head
+                    else EvidenceStatus.EMPTY
                 )
-                has_head = bool(
-                    self.source_file_contents.get("head")
-                )
-
-                if has_base or has_head:
-                    statuses[source] = EvidenceStatus.COMPLETE
-                else:
-                    statuses[source] = EvidenceStatus.EMPTY
-
                 continue
 
-            value = getattr(self, source, None)
+            value = self._evidence_value(source)
 
-            if isinstance(value, list):
+            if isinstance(value, list) or isinstance(value, dict):
                 statuses[source] = (
                     EvidenceStatus.EMPTY
                     if not value
@@ -775,6 +873,123 @@ class ReviewSnapshot:
                 statuses[source] = EvidenceStatus.COMPLETE
 
         self.evidence_statuses = statuses
+
+    def _evidence_value(self, source: str) -> Any:
+        """Return the normalized payload for an evidence source."""
+        if source == "source_file_contents":
+            return self.source_file_contents
+
+        if source == "check_runs":
+            return self.check_runs
+
+        if source == "codeowners":
+            return {
+                "path": self.codeowners_path,
+                "text": self.codeowners_text,
+            }
+
+        if source == "review_threads":
+            return (
+                self.review_threads.as_dict()
+                if self.review_threads is not None
+                else None
+            )
+
+        return getattr(self, source, None)
+
+    def _has_evidence_value(self, source: str, value: Any) -> bool:
+        """Return whether a source contains useful evidence."""
+        if source == "source_file_contents":
+            return bool(
+                isinstance(value, dict)
+                and (
+                    value.get("base")
+                    or value.get("head")
+                )
+            )
+
+        if source == "check_runs":
+            return bool(
+                isinstance(value, dict)
+                and value.get("check_runs")
+            )
+
+        if source == "codeowners":
+            return bool(
+                isinstance(value, dict)
+                and (
+                    value.get("path")
+                    or value.get("text")
+                )
+            )
+
+        if source == "review_threads":
+            if isinstance(value, Mapping):
+                return bool(value.get("threads"))
+            return bool(value)
+
+        return bool(value)
+
+    @classmethod
+    def _status_from_collection_metadata(
+        cls,
+        source: str,
+        *,
+        stats: Mapping[str, Any] | None = None,
+    ) -> EvidenceStatus | None:
+        """Derive a source status from explicit collector metadata.
+
+        Supported metadata forms are intentionally small and deterministic:
+        ``status`` is authoritative; otherwise ``truncated`` or a bounded
+        ``limit``/``collected``/``total`` relationship implies SAMPLED or
+        PARTIAL.  A known zero total is EMPTY.
+
+        ``stats`` is optional so this helper can also be used by
+        ``_ensure_evidence_statuses`` with the snapshot's collection stats.
+        """
+        stats_mapping = stats if isinstance(stats, Mapping) else {}
+        evidence_stats = stats_mapping.get("evidence")
+        metadata = (
+            evidence_stats.get(source)
+            if isinstance(evidence_stats, Mapping)
+            else None
+        )
+
+        if not isinstance(metadata, Mapping):
+            return None
+
+        explicit = metadata.get("status")
+        if explicit is not None:
+            return _normalise_status(explicit)
+
+        truncated = metadata.get("truncated")
+        if truncated is True:
+            return EvidenceStatus.SAMPLED
+
+        collected = metadata.get("collected")
+        total = metadata.get("total")
+        limit = metadata.get("limit")
+
+        if (
+            isinstance(collected, int)
+            and isinstance(total, int)
+            and collected >= 0
+            and total >= 0
+        ):
+            if total == 0:
+                return EvidenceStatus.EMPTY
+            if collected < total:
+                return (
+                    EvidenceStatus.SAMPLED
+                    if isinstance(limit, int) and limit >= 0
+                    else EvidenceStatus.PARTIAL
+                )
+            return EvidenceStatus.COMPLETE
+
+        if isinstance(total, int) and total == 0:
+            return EvidenceStatus.EMPTY
+
+        return None
 
     def _ensure_provenance(self) -> None:
         """Ensure every known source has a minimal provenance record."""
@@ -871,6 +1086,11 @@ class ReviewSnapshot:
             evidence,
             "review_comments",
         )
+
+        review_threads = _normalise_review_threads(
+            evidence.get("review_threads")
+        )
+
         issue_comments = _list_value(
             evidence,
             "issue_comments",
@@ -935,6 +1155,7 @@ class ReviewSnapshot:
             files=files,
             reviews=reviews,
             review_comments=review_comments,
+            review_threads=review_threads,
             issue_comments=issue_comments,
             timeline=timeline,
             linked_issues=linked_issues,
@@ -1015,69 +1236,70 @@ class ReviewSnapshot:
         stats: Any,
         source_file_contents: Mapping[str, Any],
     ) -> dict[str, EvidenceStatus]:
-        """Build conservative per-source status metadata.
+        """Build conservative per-source evidence statuses.
 
-        ``github.py`` may provide richer source metadata in future versions.
-        This method understands several useful conventions while remaining
-        backwards compatible with the current collector result shape.
+        Precedence:
 
-        The critical rule is that a successful bounded collector is not
-        automatically COMPLETE.
+        1. Explicit source status from the collector.
+        2. Explicit per-source collection statistics.
+        3. Exact source errors.
+        4. Scoped/per-item errors.
+        5. Conservative payload-shape inference.
+
+        Payload presence alone must never override explicit bounded,
+        sampled, partial, failed, unavailable, or not-collected metadata.
         """
         statuses: dict[str, EvidenceStatus] = {}
 
         explicit = evidence.get("evidence_statuses")
+        if isinstance(explicit, Mapping):
+            statuses.update(_normalise_evidence_statuses(explicit))
 
-        if isinstance(explicit, dict):
-            statuses.update(
-                _normalise_evidence_statuses(explicit)
-            )
-
-        stats_mapping = (
-            stats
-            if isinstance(stats, dict)
-            else {}
-        )
-
+        stats_mapping = stats if isinstance(stats, Mapping) else {}
         source_stats = stats_mapping.get("evidence")
 
-        if isinstance(source_stats, dict):
+        if isinstance(source_stats, Mapping):
             for source, metadata in source_stats.items():
-                if source in statuses:
+                source_name = str(source).strip()
+                if not source_name or source_name in statuses:
+                    continue
+                if not isinstance(metadata, Mapping):
                     continue
 
-                if not isinstance(metadata, dict):
-                    continue
-
-                status = metadata.get("status")
-
+                status = cls._status_from_collection_metadata(
+                    source_name,
+                    stats=stats_mapping,
+                )
                 if status is not None:
-                    statuses[str(source)] = _normalise_status(
-                        status
-                    )
+                    statuses[source_name] = status
 
         for source in EVIDENCE_SOURCES:
-            # An exact collector failure is FAILED.  Per-item failures are
-            # handled below so a source with some successfully collected
-            # evidence becomes PARTIAL rather than falsely COMPLETE.
-            if source in errors:
-                existing = statuses.get(source)
-                statuses[source] = (
-                    EvidenceStatus.PARTIAL
-                    if existing in {
-                        EvidenceStatus.COMPLETE,
-                        EvidenceStatus.EMPTY,
-                        EvidenceStatus.SAMPLED,
-                        EvidenceStatus.PARTIAL,
-                    }
-                    else EvidenceStatus.FAILED
-                )
-                continue
-
             if source in statuses:
                 continue
 
-            has_scoped_error = cls._source_has_error(errors, source)
+            # Exact collector failure is stronger than payload shape.
+            if source in errors:
+                statuses[source] = EvidenceStatus.FAILED
+                continue
+
+            # Per-item failures mean the source cannot be represented as
+            # exhaustive.  Preserve useful evidence as PARTIAL.
+            if cls._source_has_error(errors, source):
+                value = (
+                    source_file_contents
+                    if source == "source_file_contents"
+                    else evidence.get(source)
+                )
+                if source == "check_runs":
+                    value = _check_runs_value(value)
+
+                has_value = cls._has_evidence_value_static(source, value)
+                statuses[source] = (
+                    EvidenceStatus.PARTIAL
+                    if has_value
+                    else EvidenceStatus.FAILED
+                )
+                continue
 
             if source == "pr":
                 statuses[source] = (
@@ -1091,7 +1313,6 @@ class ReviewSnapshot:
             if source == "source_file_contents":
                 base = source_file_contents.get("base", {})
                 head = source_file_contents.get("head", {})
-
                 statuses[source] = (
                     EvidenceStatus.COMPLETE
                     if base or head
@@ -1100,23 +1321,77 @@ class ReviewSnapshot:
                 continue
 
             if source == "codeowners":
-                if (
-                    evidence.get("codeowners_path")
+                statuses[source] = (
+                    EvidenceStatus.COMPLETE
+                    if evidence.get("codeowners_path")
                     or evidence.get("codeowners_text")
-                ):
-                    statuses[source] = EvidenceStatus.COMPLETE
-                else:
-                    statuses[source] = EvidenceStatus.EMPTY
+                    else EvidenceStatus.EMPTY
+                )
                 continue
 
             if source == "check_runs":
-                check_runs = _check_runs_value(
-                    evidence.get("check_runs")
-                )
-
+                check_runs = _check_runs_value(evidence.get("check_runs"))
                 statuses[source] = (
                     EvidenceStatus.EMPTY
                     if check_runs.get("total_count", 0) == 0
+                    else EvidenceStatus.COMPLETE
+                )
+                continue
+
+            if source == "review_threads":
+                review_threads = evidence.get("review_threads")
+
+                if isinstance(
+                    review_threads,
+                    ReviewThreadCollection,
+                ):
+                    thread_status = review_threads.status
+                    thread_count = len(review_threads.threads)
+
+                    if thread_status == "complete":
+                        statuses[source] = (
+                            EvidenceStatus.EMPTY
+                            if thread_count == 0
+                            else EvidenceStatus.COMPLETE
+                        )
+                    elif thread_status == "partial":
+                        statuses[source] = EvidenceStatus.PARTIAL
+                    elif thread_status == "failed":
+                        statuses[source] = EvidenceStatus.FAILED
+                    elif thread_status == "unavailable":
+                        statuses[source] = EvidenceStatus.UNAVAILABLE
+                    else:
+                        statuses[source] = EvidenceStatus.FAILED
+
+                    continue
+
+                if isinstance(review_threads, Mapping):
+                    thread_status = review_threads.get("status")
+
+                    if thread_status in {
+                        "complete",
+                        "partial",
+                        "failed",
+                        "unavailable",
+                    }:
+                        if thread_status == "complete":
+                            statuses[source] = (
+                                EvidenceStatus.EMPTY
+                                if not review_threads.get("threads")
+                                else EvidenceStatus.COMPLETE
+                            )
+                        elif thread_status == "partial":
+                            statuses[source] = EvidenceStatus.PARTIAL
+                        elif thread_status == "failed":
+                            statuses[source] = EvidenceStatus.FAILED
+                        else:
+                            statuses[source] = EvidenceStatus.UNAVAILABLE
+
+                        continue
+
+                statuses[source] = (
+                    EvidenceStatus.EMPTY
+                    if not review_threads
                     else EvidenceStatus.COMPLETE
                 )
                 continue
@@ -1135,6 +1410,47 @@ class ReviewSnapshot:
                 statuses[source] = EvidenceStatus.COMPLETE
 
         return statuses
+
+    @staticmethod
+    def _has_evidence_value_static(source: str, value: Any) -> bool:
+        """Return whether a normalized evidence payload contains data."""
+        if source == "source_file_contents":
+            return bool(
+                isinstance(value, Mapping)
+                and (
+                    value.get("base")
+                    or value.get("head")
+                )
+            )
+
+        if source == "check_runs":
+            return bool(
+                isinstance(value, Mapping)
+                and value.get("check_runs")
+            )
+
+        if source == "codeowners":
+            return bool(
+                isinstance(value, Mapping)
+                and (
+                    value.get("path")
+                    or value.get("text")
+                )
+            )
+
+        if source == "review_threads":
+            if isinstance(
+                value,
+                ReviewThreadCollection,
+            ):
+                return bool(value.threads)
+
+            return bool(
+                isinstance(value, Mapping)
+                and value.get("threads")
+            )
+
+        return bool(value)
 
     @classmethod
     def _build_provenance(
@@ -1214,12 +1530,58 @@ class ReviewSnapshot:
                         "total",
                         "truncated",
                         "status",
+                        "pages_fetched",
                     ):
                         if key in metadata:
                             record.setdefault(
                                 key,
                                 deepcopy(metadata[key]),
                             )
+
+            if source == "review_threads":
+                review_threads = evidence.get("review_threads")
+
+                if isinstance(
+                    review_threads,
+                    ReviewThreadCollection,
+                ):
+                    record.setdefault(
+                        "status",
+                        review_threads.status,
+                    )
+                    record.setdefault(
+                        "pages_fetched",
+                        review_threads.pages_fetched,
+                    )
+
+                    if review_threads.error:
+                        record.setdefault(
+                            "error",
+                            review_threads.error,
+                        )
+
+                elif isinstance(review_threads, Mapping):
+                    if "status" in review_threads:
+                        record.setdefault(
+                            "status",
+                            str(review_threads["status"]),
+                        )
+
+                    if "pages_fetched" in review_threads:
+                        record.setdefault(
+                            "pages_fetched",
+                            deepcopy(
+                                review_threads["pages_fetched"]
+                            ),
+                        )
+
+                    if (
+                        review_threads.get("error")
+                    ):
+                        record.setdefault(
+                            "error",
+                            str(review_threads["error"]),
+                        )
 
         return provenance
 
@@ -1413,9 +1775,22 @@ class ReviewSnapshot:
         else:
             status = "unavailable"
 
+        core_incomplete = [
+            source
+            for source in CORE_EVIDENCE_SOURCES
+            if statuses[source]
+            not in {
+                EvidenceStatus.COMPLETE,
+                EvidenceStatus.EMPTY,
+            }
+        ]
+
         return {
             "attempted": list(EVIDENCE_SOURCES),
             "available": operational,
+            "core_sources": list(CORE_EVIDENCE_SOURCES),
+            "core_missing": core_incomplete,
+            "core_complete": not core_incomplete,
             "complete_sources": complete,
             "empty_sources": empty,
             "partial_sources": partial,
@@ -1509,6 +1884,11 @@ class ReviewSnapshot:
                 "review_comments": deepcopy(
                     self.review_comments
                 ),
+                "review_threads": (
+                    self.review_threads.as_dict()
+                    if self.review_threads is not None
+                    else None
+                ),
                 "issue_comments": deepcopy(
                     self.issue_comments
                 ),
@@ -1581,6 +1961,14 @@ class ReviewSnapshot:
             review_comments=_list_value(
                 value,
                 "review_comments",
+            ),
+            review_threads=(
+                deepcopy(value.get("review_threads"))
+                if isinstance(
+                    value.get("review_threads"),
+                    (Mapping, list),
+                )
+                else None
             ),
             issue_comments=_list_value(
                 value,
@@ -1681,6 +2069,11 @@ class ReviewSnapshot:
             "reviews": deepcopy(self.reviews),
             "review_comments": deepcopy(
                 self.review_comments
+            ),
+            "review_threads": (
+                self.review_threads.as_dict()
+                if self.review_threads is not None
+                else None
             ),
             "issue_comments": deepcopy(
                 self.issue_comments

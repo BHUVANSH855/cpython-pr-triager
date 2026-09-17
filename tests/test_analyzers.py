@@ -214,107 +214,297 @@ class SecurityRulesTests(unittest.TestCase):
 
 
 class RefcountTests(unittest.TestCase):
-    """FIX (point 5): refcount logic was inverted."""
+    """Refcount analysis should report local ownership/lifetime risks."""
 
-    def test_leak_fires_on_more_incref_than_decref(self):
-        file_data = _make_file(
-            "Objects/foo.c",
-            ["Py_INCREF(a);", "Py_INCREF(b);"],
-        )
-        findings, _ = analyze_file(file_data)
-        rc = [f for f in findings if f.rule_id == "refcount-possible-leak"]
-        self.assertEqual(len(rc), 1)
-        self.assertEqual(rc[0].severity, "LOW")
-
-    def test_balanced_no_finding(self):
+    def test_balanced_refcount_operations_have_no_refcount_finding(self):
         file_data = _make_file(
             "Objects/foo.c",
             ["Py_INCREF(a);", "Py_DECREF(a);"],
         )
-        findings, _ = analyze_file(file_data)
-        rc = [f for f in findings if "refcount" in (f.rule_id or "")]
-        self.assertEqual(len(rc), 0)
 
-    def test_over_decref_fires(self):
+        findings, _ = analyze_file(file_data)
+
+        rc = [f for f in findings if (f.rule_id or "").startswith("refcount-")]
+        self.assertEqual(rc, [])
+
+    def test_multiple_increfs_do_not_imply_a_leak(self):
+        """Global INCREF/DECREF counts are not ownership analysis."""
         file_data = _make_file(
             "Objects/foo.c",
-            ["Py_DECREF(a);", "Py_DECREF(b);", "Py_DECREF(c);"],
+            [
+                "Py_INCREF(a);",
+                "Py_INCREF(b);",
+                "Py_INCREF(c);",
+            ],
         )
-        findings, _ = analyze_file(file_data)
-        rc = [f for f in findings if f.rule_id == "refcount-possible-overdecref"]
-        self.assertEqual(len(rc), 1)
 
-    def test_original_threshold_was_wrong(self):
-        """
-        The original code had `if inc < dec + 3: return []`
-        meaning it only fired when inc >= dec+3.
-        With 2 INCREF and 0 DECREF the original code returned [] (no finding).
-        The fixed code fires for inc > dec+1 = inc > 1, so 2 INCREF fires.
-        """
+        findings, _ = analyze_file(file_data)
+
+        ids = {f.rule_id for f in findings}
+        self.assertNotIn("refcount-possible-leak", ids)
+
+    def test_multiple_decrefs_do_not_imply_overdecref(self):
+        """Multiple DECREFs on different objects are legitimate."""
         file_data = _make_file(
             "Objects/foo.c",
-            ["Py_INCREF(a);", "Py_INCREF(b);"],
+            [
+                "Py_DECREF(a);",
+                "Py_DECREF(b);",
+                "Py_DECREF(c);",
+            ],
         )
-        findings, _ = analyze_file(file_data)
-        leak = [f for f in findings if f.rule_id == "refcount-possible-leak"]
-        self.assertTrue(leak, "2 INCREF 0 DECREF should produce leak finding (inc=2 > dec+1=1)")
 
+        findings, _ = analyze_file(file_data)
+
+        ids = {f.rule_id for f in findings}
+        self.assertNotIn("refcount-possible-overdecref", ids)
+
+    def test_unbalanced_operations_across_different_variables_do_not_trigger_count_heuristic(
+        self,
+    ):
+        """Refcount counts across unrelated variables are not evidence of a bug."""
+        file_data = _make_file(
+            "Objects/foo.c",
+            [
+                "Py_INCREF(a);",
+                "Py_INCREF(b);",
+                "Py_DECREF(c);",
+            ],
+        )
+
+        findings, _ = analyze_file(file_data)
+
+        ids = {f.rule_id for f in findings}
+        self.assertNotIn("refcount-possible-leak", ids)
+        self.assertNotIn("refcount-possible-overdecref", ids)
 
     def test_decref_before_return_fires(self):
         file_data = _make_file(
             "Objects/foo.c",
             ["Py_DECREF(obj);", "return obj;"],
         )
+
         findings, _ = analyze_file(file_data)
+
         matches = [
-            f for f in findings
+            f
+            for f in findings
             if f.rule_id == "refcount-decref-before-return"
         ]
+
         self.assertEqual(len(matches), 1)
         self.assertEqual(matches[0].severity, "MEDIUM")
+        self.assertEqual(matches[0].confidence, "medium")
         self.assertIn("obj", matches[0].message)
 
-    def test_double_decref_fires(self):
+    def test_xdecref_before_return_fires(self):
+        file_data = _make_file(
+            "Objects/foo.c",
+            ["Py_XDECREF(obj);", "return obj;"],
+        )
+
+        findings, _ = analyze_file(file_data)
+
+        matches = [
+            f
+            for f in findings
+            if f.rule_id == "refcount-decref-before-return"
+        ]
+
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].severity, "MEDIUM")
+        self.assertEqual(matches[0].confidence, "medium")
+        self.assertIn("obj", matches[0].message)
+
+    def test_double_decref_fires_for_same_variable(self):
         file_data = _make_file(
             "Objects/foo.c",
             ["Py_DECREF(obj);", "Py_DECREF(obj);"],
         )
+
         findings, _ = analyze_file(file_data)
+
         matches = [
-            f for f in findings
+            f
+            for f in findings
             if f.rule_id == "refcount-double-decref"
         ]
+
         self.assertEqual(len(matches), 1)
         self.assertEqual(matches[0].severity, "MEDIUM")
+        self.assertEqual(matches[0].confidence, "medium")
         self.assertIn("double DECREF", matches[0].message)
+
+    def test_xdecref_double_decref_fires_for_same_variable(self):
+        file_data = _make_file(
+            "Objects/foo.c",
+            ["Py_XDECREF(obj);", "Py_XDECREF(obj);"],
+        )
+
+        findings, _ = analyze_file(file_data)
+
+        matches = [
+            f
+            for f in findings
+            if f.rule_id == "refcount-double-decref"
+        ]
+
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].severity, "MEDIUM")
+        self.assertEqual(matches[0].confidence, "medium")
 
     def test_different_decrefs_do_not_fire_double_decref(self):
         file_data = _make_file(
             "Objects/foo.c",
             ["Py_DECREF(first);", "Py_DECREF(second);"],
         )
+
         findings, _ = analyze_file(file_data)
+
         matches = [
-            f for f in findings
+            f
+            for f in findings
             if f.rule_id == "refcount-double-decref"
         ]
+
         self.assertEqual(matches, [])
+
+    def test_refcount_calls_in_comments_do_not_trigger_count_findings(self):
+        file_data = _make_file(
+            "Objects/foo.c",
+            [
+                "/* Py_INCREF(a); Py_DECREF(a); */",
+                "// Py_INCREF(b); Py_DECREF(b);",
+            ],
+        )
+
+        findings, _ = analyze_file(file_data)
+
+        matches = [
+            f
+            for f in findings
+            if (f.rule_id or "").startswith("refcount-")
+        ]
+
+        self.assertEqual(matches, [])
+
+    def test_refcount_calls_in_strings_do_not_trigger_count_findings(self):
+        file_data = _make_file(
+            "Objects/foo.c",
+            [
+                'const char *text = "Py_INCREF(a); Py_DECREF(a);";',
+            ],
+        )
+
+        findings, _ = analyze_file(file_data)
+
+        matches = [
+            f
+            for f in findings
+            if (f.rule_id or "").startswith("refcount-")
+        ]
+
+        self.assertEqual(matches, [])
+
+    def test_decref_before_return_remains_a_review_prompt_not_a_proof(self):
+        file_data = _make_file(
+            "Objects/foo.c",
+            [
+                "Py_DECREF(obj);",
+                "return obj;",
+            ],
+        )
+
+        findings, _ = analyze_file(file_data)
+
+        match = next(
+            f
+            for f in findings
+            if f.rule_id == "refcount-decref-before-return"
+        )
+
+        self.assertEqual(match.severity, "MEDIUM")
+        self.assertEqual(match.confidence, "medium")
+        self.assertIn("review", match.message.lower())
 
     def test_refcount_safety_rules_do_not_apply_to_python(self):
         file_data = _make_file(
             "Lib/foo.py",
             ["Py_DECREF(obj);", "return obj;"],
         )
+
         findings, _ = analyze_file(file_data)
+
         matches = [
-            f for f in findings
+            f
+            for f in findings
             if f.rule_id in {
                 "refcount-decref-before-return",
                 "refcount-double-decref",
+                "refcount-possible-leak",
+                "refcount-possible-overdecref",
             }
         ]
+
         self.assertEqual(matches, [])
 
+    def test_newref_is_not_counted_as_incref_or_leak_evidence(self):
+        file_data = _make_file(
+            "Objects/foo.c",
+            [
+                "PyObject *result = Py_NewRef(obj);",
+            ],
+        )
+
+        findings, _ = analyze_file(file_data)
+
+        ids = {f.rule_id for f in findings}
+        self.assertNotIn("refcount-possible-leak", ids)
+        self.assertNotIn("refcount-possible-overdecref", ids)
+
+    def test_xnewref_is_not_counted_as_incref_or_leak_evidence(self):
+        file_data = _make_file(
+            "Objects/foo.c",
+            [
+                "PyObject *result = Py_XNewRef(obj);",
+            ],
+        )
+
+        findings, _ = analyze_file(file_data)
+
+        ids = {f.rule_id for f in findings}
+        self.assertNotIn("refcount-possible-leak", ids)
+        self.assertNotIn("refcount-possible-overdecref", ids)
+
+    def test_setref_is_not_treated_as_two_independent_refcount_operations(
+        self,
+    ):
+        file_data = _make_file(
+            "Objects/foo.c",
+            [
+                "Py_SETREF(obj, value);",
+            ],
+        )
+
+        findings, _ = analyze_file(file_data)
+
+        ids = {f.rule_id for f in findings}
+        self.assertNotIn("refcount-possible-leak", ids)
+        self.assertNotIn("refcount-possible-overdecref", ids)
+
+    def test_clear_is_not_treated_as_an_overdecref(self):
+        file_data = _make_file(
+            "Objects/foo.c",
+            [
+                "Py_CLEAR(obj);",
+            ],
+        )
+
+        findings, _ = analyze_file(file_data)
+
+        ids = {f.rule_id for f in findings}
+        self.assertNotIn("refcount-possible-leak", ids)
+        self.assertNotIn("refcount-possible-overdecref", ids)
 
 
 class CApiBoundaryTests(unittest.TestCase):

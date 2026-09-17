@@ -1188,95 +1188,17 @@ def _add_refcount_safety_findings(file_data: dict) -> list[Finding]:
 def _add_refcount_finding(
     file_data: dict,
 ) -> list[Finding]:
-    filename = file_data.get("filename", "")
+    """Return conservative refcount findings.
 
-    if not _is_c_family_for_refcount(filename):
-        return []
+    Aggregate INCREF/DECREF counts across a diff are not ownership analysis:
+    operations may apply to unrelated objects, different control-flow paths,
+    or different ownership conventions.  Therefore this helper deliberately
+    does not infer leaks or over-decrefs from diff-wide operation counts.
 
-    patch = file_data.get("patch")
-
-    added_text = "\n".join(
-        line.text
-        for line in added_lines(patch)
-    )
-
-    inc = len(
-        re.findall(
-            r"\bPy_INCREF\s*\(",
-            added_text,
-        )
-    )
-    dec = len(
-        re.findall(
-            r"\bPy_(?:X)?DECREF\s*\(",
-            added_text,
-        )
-    )
-
-    findings: list[Finding] = []
-
-    if inc > dec + 1:
-        findings.append(
-            Finding(
-                severity="LOW",
-                category="REFCOUNT",
-                message=(
-                    f"Added diff contains {inc} INCREF vs {dec} DECREF "
-                    "operations; inspect ownership paths for potential leak."
-                ),
-                confidence="low",
-                source="deterministic",
-                evidence_refs=[
-                    EvidenceRef(
-                        kind="diff",
-                        description=(
-                            "Local diff count suggests possible reference leak."
-                        ),
-                        source="patch",
-                        file=filename,
-                        observed=(
-                            f"Py_INCREF={inc}, "
-                            f"Py_DECREF/Py_XDECREF={dec}"
-                        ),
-                    )
-                ],
-                file=filename,
-                rule_id="refcount-possible-leak",
-            )
-        )
-
-    if dec > inc + 2:
-        findings.append(
-            Finding(
-                severity="LOW",
-                category="REFCOUNT",
-                message=(
-                    f"Added diff contains {dec} DECREF vs {inc} INCREF "
-                    "operations; inspect for potential over-decrement or double-free."
-                ),
-                confidence="low",
-                source="deterministic",
-                evidence_refs=[
-                    EvidenceRef(
-                        kind="diff",
-                        description=(
-                            "Local diff count suggests possible over-decrement."
-                        ),
-                        source="patch",
-                        file=filename,
-                        observed=(
-                            f"Py_DECREF/Py_XDECREF={dec}, "
-                            f"Py_INCREF={inc}"
-                        ),
-                    )
-                ],
-                file=filename,
-                rule_id="refcount-possible-overdecref",
-            )
-        )
-
-    return findings
-
+    Local lifetime/ownership patterns are handled separately by
+    _add_refcount_safety_findings().
+    """
+    return []
 
 
 _FREE_THREAD_GIL_DISABLED_RE = re.compile(r"\bPy_GIL_DISABLED\b")

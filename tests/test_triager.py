@@ -119,25 +119,23 @@ Python/* @python-team
             )
         )
 
-    def test_refcount_leak_fires(self):
+    def test_refcount_diff_wide_counts_do_not_create_leak_finding(self):
         findings, _ = triager.analyze_diff([{
             "filename": "Objects/example.c",
-            "patch": (
-                "@@ -0 +1,3 @@\n"
-                "+Py_INCREF(a)\n"
-                "+Py_INCREF(b)\n"
-                "+return 0;"
-            ),
+            "patch": "@@ -0 +1,2 @@\n+Py_INCREF(obj);\n+Py_INCREF(obj);",
         }])
-        rc = [f for f in findings if f.category == "REFCOUNT"]
+
+        refcount_findings = [
+            finding
+            for finding in findings
+            if finding.category == "REFCOUNT"
+        ]
+
         self.assertEqual(
-            len(rc),
-            1,
-            "Expected exactly one REFCOUNT finding for 2 INCREF 0 DECREF",
+            refcount_findings,
+            [],
+            "Diff-wide INCREF/DECREF counts must not imply a refcount leak",
         )
-        self.assertEqual(rc[0].severity, "LOW")
-        self.assertEqual(rc[0].confidence, "low")
-        self.assertIn("leak", rc[0].message.lower())
 
     def test_refcount_balanced_no_finding(self):
         findings, _ = triager.analyze_diff([{
@@ -147,24 +145,28 @@ Python/* @python-team
         rc = [f for f in findings if f.category == "REFCOUNT"]
         self.assertEqual(len(rc), 0)
 
-    def test_refcount_is_low_confidence(self):
+    def test_refcount_diff_wide_counts_do_not_create_low_confidence_finding(self):
         findings, _ = triager.analyze_diff([{
             "filename": "Objects/example.c",
             "patch": (
-                "@@ -0 +1,5 @@\n"
-                "+Py_INCREF(a)\n"
-                "+Py_INCREF(b)\n"
-                "+Py_INCREF(c)\n"
-                "+return 0;"
+                "@@ -0 +1,3 @@\n"
+                "+Py_INCREF(obj);\n"
+                "+Py_INCREF(obj);\n"
+                "+Py_INCREF(obj);"
             ),
         }])
-        rc = [f for f in findings if f.category == "REFCOUNT"]
-        self.assertTrue(
-            rc,
-            "Expected REFCOUNT finding for 3 INCREF 0 DECREF",
+
+        refcount_findings = [
+            finding
+            for finding in findings
+            if finding.category == "REFCOUNT"
+        ]
+
+        self.assertEqual(
+            refcount_findings,
+            [],
+            "Diff-wide refcount operation counts must not create a finding",
         )
-        self.assertEqual(rc[0].severity, "LOW")
-        self.assertEqual(rc[0].confidence, "low")
 
     def test_malloc_finding(self):
         findings, _ = triager.analyze_diff([{

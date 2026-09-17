@@ -49,6 +49,13 @@ EVIDENCE_STATUSES = {
     "unavailable",
 }
 
+REVIEW_THREAD_COLLECTION_STATUSES = {
+    "complete",
+    "partial",
+    "failed",
+    "unavailable",
+}
+
 
 def _require_choice(
     value: Any,
@@ -320,17 +327,10 @@ class EvidenceCompleteness:
         missing = set(self.missing)
         errors = set(self.errors)
 
-        # Errors establish that a source was attempted, but intentionally do
-        # not force the source into ``missing``. The error itself carries the
-        # stronger diagnostic information and the established public model
-        # keeps errors distinct from explicit missing evidence.
         attempted.update(errors)
 
-        # Explicit availability wins over a conflicting missing marker.
         missing.difference_update(available)
 
-        # Any source explicitly represented in either collection is
-        # necessarily part of the attempted evidence surface.
         attempted.update(available)
         attempted.update(missing)
 
@@ -402,6 +402,138 @@ class EvidenceCompleteness:
         data["complete"] = self.complete
         data["status"] = self.status
         return data
+
+
+@dataclass
+class ReviewThread:
+    """Canonical representation of one GitHub pull-request review thread.
+
+    Resolution state comes from GitHub's GraphQL review-thread API. Author
+    and timestamp remain optional because nested GitHub fields can be absent
+    in partial or malformed responses.
+    """
+
+    thread_id: str | None = None
+    is_resolved: bool = False
+    author: str | None = None
+    created_at: str | None = None
+
+    def __post_init__(self) -> None:
+        _validate_optional_string(
+            self.thread_id,
+            "ReviewThread.thread_id",
+        )
+        _validate_optional_string(
+            self.author,
+            "ReviewThread.author",
+        )
+        _validate_optional_string(
+            self.created_at,
+            "ReviewThread.created_at",
+        )
+        self.is_resolved = bool(self.is_resolved)
+
+    @property
+    def unresolved(self) -> bool:
+        """Return whether the thread still requires resolution."""
+        return not self.is_resolved
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return a JSON-compatible representation."""
+        return asdict(self)
+
+
+@dataclass
+class ReviewThreadCollection:
+    """Normalized collection state for GitHub review-thread evidence.
+
+    An empty successful collection is ``complete``. ``partial`` means some
+    authoritative data was collected but pagination or another collection
+    boundary prevented full coverage. ``failed`` means collection was
+    attempted but produced no usable evidence. ``unavailable`` means the
+    source could not be used, such as missing GraphQL authentication.
+    """
+
+    status: str = "unavailable"
+    threads: list[ReviewThread] = field(default_factory=list)
+    error: str | None = None
+    pages_fetched: int = 0
+
+    def __post_init__(self) -> None:
+        _require_choice(
+            self.status,
+            REVIEW_THREAD_COLLECTION_STATUSES,
+            "ReviewThreadCollection.status",
+        )
+
+        if not isinstance(self.threads, list):
+            raise TypeError(
+                "ReviewThreadCollection.threads must be a list"
+            )
+
+        normalized: list[ReviewThread] = []
+        for thread in self.threads:
+            if isinstance(thread, ReviewThread):
+                normalized.append(thread)
+            elif isinstance(thread, dict):
+                normalized.append(ReviewThread(**thread))
+            else:
+                raise TypeError(
+                    "ReviewThreadCollection.threads entries must be "
+                    "ReviewThread objects or dicts"
+                )
+
+        normalized.sort(
+            key=lambda item: (
+                item.thread_id or "",
+                item.created_at or "",
+                item.author or "",
+            )
+        )
+        self.threads = normalized
+
+        try:
+            self.pages_fetched = max(0, int(self.pages_fetched or 0))
+        except (TypeError, ValueError):
+            self.pages_fetched = 0
+
+        _validate_optional_string(
+            self.error,
+            "ReviewThreadCollection.error",
+        )
+
+    @property
+    def unresolved_count(self) -> int:
+        """Return the number of unresolved review threads."""
+        return sum(thread.unresolved for thread in self.threads)
+
+    @property
+    def resolved_count(self) -> int:
+        """Return the number of resolved review threads."""
+        return len(self.threads) - self.unresolved_count
+
+    @property
+    def available(self) -> bool:
+        """Return whether usable review-thread evidence was collected."""
+        return self.status in {"complete", "partial"}
+
+    @property
+    def complete(self) -> bool:
+        """Return whether the complete thread collection was obtained."""
+        return self.status == "complete"
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return the complete machine-readable representation."""
+        return {
+            "status": self.status,
+            "threads": [thread.as_dict() for thread in self.threads],
+            "error": self.error,
+            "pages_fetched": self.pages_fetched,
+            "unresolved_count": self.unresolved_count,
+            "resolved_count": self.resolved_count,
+            "available": self.available,
+            "complete": self.complete,
+        }
 
 
 @dataclass
@@ -776,6 +908,11 @@ class TriageReport:
 
     checks: CheckSummary | None = None
 
+    # First-class authoritative GitHub GraphQL review-thread evidence.
+    # None preserves compatibility with reports produced before this field
+    # existed.
+    review_threads: ReviewThreadCollection | None = None
+
     evidence_completeness: EvidenceCompleteness = field(
         default_factory=EvidenceCompleteness
     )
@@ -999,6 +1136,32 @@ class TriageReport:
             for context in self.expert_contexts
         ]
 
+        if self.review_threads is not None:
+            if isinstance(
+                self.review_threads,
+                dict,
+            ):
+                self.review_threads = ReviewThreadCollection(
+                    **self.review_threads
+                )
+            elif isinstance(
+                self.review_threads,
+                list,
+            ):
+                # Backwards-compatible acceptance of the raw collector list.
+                self.review_threads = ReviewThreadCollection(
+                    status="complete",
+                    threads=self.review_threads,
+                )
+            elif not isinstance(
+                self.review_threads,
+                ReviewThreadCollection,
+            ):
+                raise TypeError(
+                    "TriageReport.review_threads must be "
+                    "ReviewThreadCollection, list, dict, or None"
+                )
+
         if self.checks is not None:
             if isinstance(
                 self.checks,
@@ -1026,5 +1189,8 @@ class TriageReport:
             context.as_dict()
             for context in self.expert_contexts
         ]
+
+        if self.review_threads is not None:
+            data["review_threads"] = self.review_threads.as_dict()
 
         return data

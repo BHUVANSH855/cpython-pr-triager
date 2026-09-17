@@ -36,6 +36,8 @@ from scripts.triager.codeowners import (
 from scripts.triager.github import GitHub as TriagerGitHub
 from scripts.triager.policy import (
     branch_and_backport_signals as policy_branch_signals,
+)
+from scripts.triager.policy import (
     build_review_state as policy_build_review_state,
 )
 
@@ -725,9 +727,9 @@ def _check_run_recency_key(run):
             return value
 
         if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=dt.timezone.utc)
+            parsed = parsed.replace(tzinfo=dt.UTC)
 
-        return parsed.astimezone(dt.timezone.utc).isoformat()
+        return parsed.astimezone(dt.UTC).isoformat()
 
     run_id = run.get("id")
     if isinstance(run_id, bool):
@@ -1139,6 +1141,53 @@ def mergeability_signals(pr, checks):
 # Report assembly
 # ---------------------------------------------------------------------------
 
+def _suppress_redundant_process_signals(
+    process: list[tuple[str, str]],
+    findings,
+) -> list[tuple[str, str]]:
+    """Suppress presentation-only process warnings already covered by findings.
+
+    Technical findings carry rule IDs and evidence references, so they are the
+    canonical representation of deterministic change-impact checks. Policy
+    signals remain authoritative for disposition; this helper only prevents
+    the final human-facing report from displaying the same condition twice.
+    """
+
+    finding_rule_ids = {
+        getattr(finding, "rule_id", None)
+        for finding in findings
+        if getattr(finding, "rule_id", None)
+    }
+
+    result = []
+
+    for signal in process:
+        if not isinstance(signal, tuple) or len(signal) != 2:
+            result.append(signal)
+            continue
+
+        level, message = signal
+
+        if (
+            "production-change-without-tests" in finding_rule_ids
+            and level == "WARN"
+            and isinstance(message, str)
+            and "No test file changed" in message
+        ):
+            continue
+
+        if (
+            "user-visible-change-without-news" in finding_rule_ids
+            and level == "WARN"
+            and isinstance(message, str)
+            and "No Misc/NEWS.d entry detected" in message
+        ):
+            continue
+
+        result.append(signal)
+
+    return result
+
 def make_report(gh, evidence, linked_issues, experts, patterns, reviewer_activity_cache=None):
     files = evidence["files"]
     timeline = evidence["timeline"]
@@ -1201,6 +1250,14 @@ def make_report(gh, evidence, linked_issues, experts, patterns, reviewer_activit
         evidence_completeness,
     )
 
+    # Keep the complete process signal set for deterministic disposition.
+    # Only suppress duplicate human-facing warnings that are already represented
+    # by canonical deterministic technical findings.
+    report_process = _suppress_redundant_process_signals(
+        process,
+        findings,
+    )
+
     report = build_report(
         repository=REPO,
         generated_at=dt.datetime.now(dt.UTC).isoformat(),
@@ -1209,7 +1266,7 @@ def make_report(gh, evidence, linked_issues, experts, patterns, reviewer_activit
         experts=experts,
         findings=findings,
         signatures=signatures,
-        process=process,
+        process=report_process,
         backports=backports,
         disposition=report_disposition,
         checks=checks,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from scripts.triager.snapshot import ReviewSnapshot
+from scripts.triager.snapshot import EvidenceStatus, ReviewSnapshot
 
 
 class FakeGitHub:
@@ -68,6 +68,24 @@ def make_result():
                     "body": "See #100003 for the previous behavior.",
                 }
             ],
+            "review_threads": {
+                "status": "complete",
+                "threads": [
+                    {
+                        "id": "thread-1",
+                        "is_resolved": False,
+                        "author": "reviewer-one",
+                        "created_at": "2026-09-17T10:00:00Z",
+                    },
+                    {
+                        "id": "thread-2",
+                        "is_resolved": True,
+                        "author": "reviewer-two",
+                        "created_at": "2026-09-17T11:00:00Z",
+                    },
+                ],
+                "pages_fetched": 1,
+            },
             "issue_comments": [
                 {
                     "id": 3,
@@ -153,6 +171,179 @@ def test_collect_builds_snapshot_from_existing_evidence():
             [999999],
         )
     ]
+
+
+def test_collect_normalizes_review_thread_ids():
+    gh = FakeGitHub(make_result())
+
+    snapshot = ReviewSnapshot.collect(gh, 123456)
+
+    assert snapshot.review_threads is not None
+    assert snapshot.review_threads.status == "complete"
+    assert len(snapshot.review_threads.threads) == 2
+
+    assert snapshot.review_threads.threads[0].thread_id == "thread-1"
+    assert snapshot.review_threads.threads[0].is_resolved is False
+    assert snapshot.review_threads.threads[0].author == "reviewer-one"
+
+    assert snapshot.review_threads.threads[1].thread_id == "thread-2"
+    assert snapshot.review_threads.threads[1].is_resolved is True
+
+
+def test_complete_empty_review_threads_are_empty_evidence():
+    result = make_result()
+    result["evidence"]["review_threads"] = {
+        "status": "complete",
+        "threads": [],
+        "pages_fetched": 1,
+    }
+
+    gh = FakeGitHub(result)
+    snapshot = ReviewSnapshot.collect(gh, 123456)
+
+    assert snapshot.review_threads is not None
+    assert snapshot.review_threads.status == "complete"
+    assert snapshot.review_threads.threads == []
+
+    assert (
+        snapshot.evidence_status("review_threads")
+        == EvidenceStatus.EMPTY
+    )
+
+    completeness = snapshot.completeness()
+
+    assert "review_threads" in completeness["empty_sources"]
+    assert "review_threads" not in completeness["missing"]
+
+
+def test_nonempty_review_threads_are_complete_evidence():
+    gh = FakeGitHub(make_result())
+
+    snapshot = ReviewSnapshot.collect(gh, 123456)
+
+    assert (
+        snapshot.evidence_status("review_threads")
+        == EvidenceStatus.COMPLETE
+    )
+
+    completeness = snapshot.completeness()
+
+    assert "review_threads" in completeness["complete_sources"]
+    assert "review_threads" not in completeness["missing"]
+
+
+def test_partial_review_threads_remain_partial():
+    result = make_result()
+    result["evidence"]["review_threads"] = {
+        "status": "partial",
+        "threads": [
+            {
+                "id": "thread-1",
+                "is_resolved": False,
+            }
+        ],
+        "pages_fetched": 10,
+        "error": "review thread pagination limit reached",
+    }
+
+    gh = FakeGitHub(result)
+    snapshot = ReviewSnapshot.collect(gh, 123456)
+
+    assert snapshot.evidence_status("review_threads") == EvidenceStatus.PARTIAL
+    assert snapshot.review_threads is not None
+    assert snapshot.review_threads.error == (
+        "review thread pagination limit reached"
+    )
+
+    assert snapshot.is_complete is True
+
+
+def test_failed_review_threads_are_failed_evidence():
+    result = make_result()
+    result["evidence"]["review_threads"] = {
+        "status": "failed",
+        "threads": [],
+        "pages_fetched": 0,
+        "error": "GraphQL request failed",
+    }
+
+    gh = FakeGitHub(result)
+    snapshot = ReviewSnapshot.collect(gh, 123456)
+
+    assert snapshot.evidence_status("review_threads") == EvidenceStatus.FAILED
+    assert snapshot.review_threads is not None
+    assert snapshot.review_threads.error == "GraphQL request failed"
+
+
+def test_unavailable_review_threads_are_unavailable_evidence():
+    result = make_result()
+    result["evidence"]["review_threads"] = {
+        "status": "unavailable",
+        "threads": [],
+        "pages_fetched": 0,
+        "error": "GitHub token required",
+    }
+
+    gh = FakeGitHub(result)
+    snapshot = ReviewSnapshot.collect(gh, 123456)
+
+    assert (
+        snapshot.evidence_status("review_threads")
+        == EvidenceStatus.UNAVAILABLE
+    )
+
+    assert snapshot.review_threads is not None
+    assert snapshot.review_threads.available is False
+
+
+def test_review_threads_round_trip_through_snapshot_dict():
+    gh = FakeGitHub(make_result())
+
+    snapshot = ReviewSnapshot.collect(gh, 123456)
+
+    serialized = snapshot.to_dict()
+    restored = ReviewSnapshot.from_dict(serialized)
+
+    assert restored.review_threads is not None
+    assert restored.review_threads.status == "complete"
+    assert len(restored.review_threads.threads) == 2
+
+    assert restored.review_threads.threads[0].thread_id == "thread-1"
+    assert restored.review_threads.threads[0].is_resolved is False
+
+    assert restored.review_threads.threads[1].thread_id == "thread-2"
+    assert restored.review_threads.threads[1].is_resolved is True
+
+    assert restored.to_dict() == serialized
+
+
+def test_to_evidence_preserves_review_thread_evidence():
+    gh = FakeGitHub(make_result())
+
+    snapshot = ReviewSnapshot.collect(gh, 123456)
+
+    evidence = snapshot.to_evidence()
+
+    assert "review_threads" in evidence
+    assert evidence["review_threads"] == snapshot.review_threads.as_dict()
+
+    assert evidence["review_threads"]["status"] == "complete"
+    assert evidence["review_threads"]["threads"][0]["thread_id"] == "thread-1"
+    assert "id" not in evidence["review_threads"]["threads"][0]
+
+
+def test_legacy_snapshot_without_review_threads_is_not_collected():
+    result = make_result()
+    result["evidence"].pop("review_threads")
+
+    gh = FakeGitHub(result)
+    snapshot = ReviewSnapshot.collect(gh, 123456)
+
+    assert snapshot.review_threads is None
+    assert (
+        snapshot.evidence_status("review_threads")
+        == EvidenceStatus.EMPTY
+    )
 
 
 def test_collect_discovers_references_across_pr_discussion():

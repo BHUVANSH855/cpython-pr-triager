@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from scripts.analyze import _suppress_redundant_process_signals
+from scripts.triager.policy import disposition as policy_disposition
 from scripts.triager.report import (
     _build_evidence_counts,
     _build_expert_contexts,
@@ -736,6 +738,158 @@ class ReportAssemblyTests:
         ]
         assert len(block_signals) == 1
         assert "reported failure" in block_signals[0]["message"]
+
+    def test_redundant_test_process_warning_is_suppressed_only_from_report(self):
+        """The technical finding is the human-facing representation of the
+        missing-test condition, but the policy warning remains available to
+        deterministic disposition.
+        """
+        process = [
+            (
+                "WARN",
+                "No test file changed; verify whether regression or "
+                "behavior coverage is needed.",
+            ),
+            ("INFO", "Unrelated process signal."),
+        ]
+
+        finding = SimpleNamespace(
+            rule_id="production-change-without-tests",
+        )
+
+        filtered = _suppress_redundant_process_signals(
+            process,
+            [finding],
+        )
+
+        assert filtered == [
+            ("INFO", "Unrelated process signal."),
+        ]
+
+        disposition = policy_disposition(
+            process,
+            [],
+            None,
+        )
+
+        assert disposition == "NEEDS_MAINTAINER_ATTENTION"
+
+    def test_redundant_news_process_warning_is_suppressed_only_from_report(self):
+        """The NEWS technical finding replaces the duplicate human-facing
+        policy warning, while the original policy warning still participates
+        in disposition.
+        """
+        process = [
+            (
+                "WARN",
+                "No Misc/NEWS.d entry detected; verify whether the change "
+                "requires one under CPython's NEWS policy.",
+            ),
+            ("INFO", "Unrelated process signal."),
+        ]
+
+        finding = SimpleNamespace(
+            rule_id="user-visible-change-without-news",
+        )
+
+        filtered = _suppress_redundant_process_signals(
+            process,
+            [finding],
+        )
+
+        assert filtered == [
+            ("INFO", "Unrelated process signal."),
+        ]
+
+        disposition = policy_disposition(
+            process,
+            [],
+            None,
+        )
+
+        assert disposition == "NEEDS_MAINTAINER_ATTENTION"
+
+    def test_redundant_process_warning_is_not_suppressed_without_matching_finding(self):
+        """A policy warning must remain visible when no canonical technical
+        finding covers the same condition.
+        """
+        process = [
+            (
+                "WARN",
+                "No test file changed; verify whether regression or "
+                "behavior coverage is needed.",
+            ),
+        ]
+
+        filtered = _suppress_redundant_process_signals(
+            process,
+            [],
+        )
+
+        assert filtered == process
+
+    def test_unrelated_process_signals_are_preserved(self):
+        """Filtering duplicate change-impact warnings must not remove
+        unrelated process or evidence signals.
+        """
+        process = [
+            (
+                "WARN",
+                "No test file changed; verify whether regression or "
+                "behavior coverage is needed.",
+            ),
+            (
+                "BLOCK",
+                "Explicit repository process blocker.",
+            ),
+            (
+                "WARN",
+                "Review evidence is incomplete.",
+            ),
+        ]
+
+        finding = SimpleNamespace(
+            rule_id="production-change-without-tests",
+        )
+
+        filtered = _suppress_redundant_process_signals(
+            process,
+            [finding],
+        )
+
+        assert filtered == [
+            (
+                "BLOCK",
+                "Explicit repository process blocker.",
+            ),
+            (
+                "WARN",
+                "Review evidence is incomplete.",
+            ),
+        ]
+
+    def test_docs_warning_is_not_suppressed_by_unrelated_change_impact_finding(self):
+        """The documentation warning is intentionally not treated as a
+        duplicate because there is no equivalent suppression rule.
+        """
+        process = [
+            (
+                "WARN",
+                "No documentation file changed; verify whether public API "
+                "documentation needs updating.",
+            ),
+        ]
+
+        finding = SimpleNamespace(
+            rule_id="public-api-change-without-docs",
+        )
+
+        filtered = _suppress_redundant_process_signals(
+            process,
+            [finding],
+        )
+
+        assert filtered == process
 
     def test_build_report_exposes_canonical_check_summaries(self):
         checks = {
