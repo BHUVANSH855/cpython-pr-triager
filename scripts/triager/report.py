@@ -316,9 +316,7 @@ def _build_historical_context(evidence):
         ]
         if any(value == "sampled" for value in history_statuses):
             history_status = "sampled"
-        elif any(value == "partial" for value in history_statuses):
-            history_status = "partial"
-        elif any(value in {"failed", "unavailable"} for value in history_statuses):
+        elif any(value == "partial" for value in history_statuses) or any(value in {"failed", "unavailable"} for value in history_statuses):
             history_status = "partial"
     if history_errors and history_status == "complete":
         history_status = "partial"

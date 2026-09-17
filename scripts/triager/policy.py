@@ -221,10 +221,10 @@ def _iso_age_days(value: str | None) -> float | None:
     try:
         parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
         if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=dt.timezone.utc)
+            parsed = parsed.replace(tzinfo=dt.UTC)
 
         return (
-            dt.datetime.now(dt.timezone.utc) - parsed
+            dt.datetime.now(dt.UTC) - parsed
         ).total_seconds() / 86400
     except (TypeError, ValueError):
         return None

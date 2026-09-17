@@ -2263,9 +2263,8 @@ class RequiredChecksGitHubTests(unittest.TestCase):
         gh = self.make_client(lambda request, timeout: FakeResponse({}))
 
         for branch in ("", "   ", None, 123):
-            with self.subTest(branch=branch):
-                with self.assertRaises(ValueError):
-                    gh.branch_protection(branch)
+            with self.subTest(branch=branch), self.assertRaises(ValueError):
+                gh.branch_protection(branch)
 
     def test_branch_protection_rejects_non_mapping_response(self):
         gh = self.make_client(lambda request, timeout: FakeResponse([]))
@@ -2291,9 +2290,8 @@ class RequiredChecksGitHubTests(unittest.TestCase):
         gh = self.make_client(lambda request, timeout: FakeResponse([]))
 
         for branch in ("", "   ", None, 123):
-            with self.subTest(branch=branch):
-                with self.assertRaises(ValueError):
-                    gh.branch_rules(branch)
+            with self.subTest(branch=branch), self.assertRaises(ValueError):
+                gh.branch_rules(branch)
 
     def test_branch_rules_rejects_non_list_response(self):
         gh = self.make_client(lambda request, timeout: FakeResponse({}))
@@ -2677,9 +2675,8 @@ class RequiredChecksGitHubTests(unittest.TestCase):
         gh = self.make_client(lambda request, timeout: FakeResponse({}))
 
         for branch in ("", "   ", None, 123):
-            with self.subTest(branch=branch):
-                with self.assertRaises(ValueError):
-                    gh.required_checks(branch)
+            with self.subTest(branch=branch), self.assertRaises(ValueError):
+                gh.required_checks(branch)
 
     def test_required_checks_preserves_ruleset_provenance_and_app_ids(self):
         rules = [

@@ -1273,7 +1273,7 @@ class GitHub:
                 connection = (
                     data["data"]["repository"]["pullRequest"]["reviewThreads"]
                 )
-            except (KeyError, TypeError) as exc:
+            except (KeyError, TypeError):
                 return {
                     "status": "failed" if not threads else "partial",
                     "threads": threads,
